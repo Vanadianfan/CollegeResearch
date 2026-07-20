@@ -1,0 +1,44 @@
+# macOS
+.DS_Store
+.AppleDouble
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+
+# Packaging output (root-level /build does not hide rail_data/build)
+/build/
+/dist/
+*.egg-info/
+
+# Editor-local files; keep the shared .vscode configuration tracked
+.idea/
+*.swp
+*.swo
+
+# Downloaded source datasets (recreated by scripts/download_raw_data.py)
+/raw_data/
+
+# Generated databases and SQLite sidecars
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+
+# Generated visualizer output
+*_visualizer.html
+
+# Temporary and log files
+*.tmp
+*.log

@@ -1,0 +1,4 @@
+# UM <junction_node> <incoming_edge> <loop_edge> <outgoing_edge>
+# + follows the stored graph_edge direction; - traverses it in reverse.
+# 12060 downward -> 12061 clockwise loop -> 12054 from its left endpoint.
+UM 382220 12060- 12061+ 12054-

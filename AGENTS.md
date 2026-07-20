@@ -1,0 +1,75 @@
+# Project Instructions
+
+## Purpose
+
+This project converts Japan MLIT N02-25 railway GML into a compact,
+topology-preserving SQLite network and provides an interactive verifier.
+The build entry point is `python -m rail_data.build.main`. Build
+implementation and `correction.txt` live under `rail_data/build/`; the
+downstream read-only data contract lives under `rail_data/schema/`.
+Visualization entry points live under `visualizers/`.
+Downloaded source datasets live under `raw_data/`. Generated
+`rail_network.sqlite` remains in the project root. Shared path constants are
+defined in `rail_data/paths.py`.
+Initialize a fresh checkout with `python3 setup.py`; it creates `.venv`,
+installs `requirements.txt`, and downloads the public raw datasets.
+
+## Data semantics that must be preserved
+
+- Read the UTF-8 N02 GML/XML. Preserve `Station -> RailroadSection`
+  `xlink:href`; do not reconstruct topology from GeoJSON/Shapefile or by
+  coordinate-only dissolve.
+- A source `Station` is an overlapping line, not a point. Physical track is
+  stored once as ordered `atomic_segment` rows.
+- Preserve route/operator-specific `station` rows. `station_group` / N02
+  `groupCode` is membership only; it is not proof of transfer connectivity.
+- `station.source_id` is the source Station `gml:id`; keep source codes as
+  `TEXT` so leading zeros survive.
+- `network_node` owns coordinates. Junction status is derived from topology;
+  station evaluation uses `station_anchor`.
+- Keep only research-core tables. Do not reintroduce raw
+  `railroad_section`/provenance tables unless explicitly requested.
+- Distances use GRS80 geodesic metres. A station connection must satisfy
+  `distance_m = from_station_offset_m + gap_length_m + to_station_offset_m`.
+
+## Current network rules
+
+- SQLite schema version is 7. In `station_connection`, keep
+  `to_station_offset_m` immediately after `from_station_offset_m`, followed by
+  `gap_length_m`.
+- `graph_edge.direction` is enforced during routing. Strict degree-3 bubbles
+  with exactly two parallel edges are made one-way using left-hand running.
+- `station_connection` stores both ordered directions as separate
+  `direction='forward'` rows. Query distance by the indexed pair
+  `(from_anchor_id, to_anchor_id)`; never assume the reverse distance is equal.
+- Apply `correction.txt` after raw topology compression and before calculating
+  station connections. `UM 382220 12060- 12061+ 12054-` unfolds the Yurikamome
+  loop and merges the forced path. Full-build IDs are not valid in
+  `--line-name` subset builds.
+
+## Build and verification workflow
+
+- A normal build atomically replaces the requested DB. During agent testing,
+  write to `/private/tmp`; do not overwrite `rail_network.sqlite` unless the
+  user explicitly asks.
+- Run:
+
+  ```bash
+  .venv/bin/python -m rail_data.build.main --output /private/tmp/rail-network-test.sqlite
+  .venv/bin/python -m visualizers.network_db /private/tmp/rail-network-test.sqlite --check-only
+  ```
+
+- Preserve unrelated user files and changes. Treat the two known unmatched
+  stations (敦賀 and 箕面船場阪大前) as warnings unless their source matching is
+  deliberately fixed.
+
+## Visualizer contract
+
+- Show stations as solid nodes, non-station junctions as hollow nodes, group
+  labels near member stations, and edge distances.
+- Hovering a station highlights every displayed member of its group by color
+  only; do not enlarge nodes.
+- The page UI is Japanese. Prefer macOS Japanese fonts (`Hiragino Sans`,
+  `Hiragino Kaku Gothic ProN`) and show detail-card fields on separate lines.
+- Station details include `station.source_id`. Preserve trackpad/touch pinch
+  zoom and drag-to-pan behavior.
