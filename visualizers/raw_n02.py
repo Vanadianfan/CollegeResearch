@@ -2,7 +2,7 @@ import geopandas as gpd
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
-from rail_data.paths import RAW_DATA_ROOT
+from rail_data.paths import N02_DATASET_ID, N02_UTF8_ROOT
 
 
 # DejaVu Sans 不含完整 CJK 字形，改用 macOS 內建繁中字型。
@@ -41,9 +41,12 @@ def zoom_at_cursor(event):
 
 
 def main():
-    data_dir = RAW_DATA_ROOT / "N02-25_GML" / "UTF-8"
-    railways = gpd.read_file(data_dir / "N02-25_RailroadSection.geojson")
-    stations = gpd.read_file(data_dir / "N02-25_Station.geojson")
+    railways = gpd.read_file(
+        N02_UTF8_ROOT / f"{N02_DATASET_ID}_RailroadSection.geojson"
+    )
+    stations = gpd.read_file(
+        N02_UTF8_ROOT / f"{N02_DATASET_ID}_Station.geojson"
+    )
 
     print(stations.columns)
     print(stations.head())

@@ -5,10 +5,10 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 import zipfile
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator
 
-from rail_data.paths import RAW_DATA_ROOT
+from rail_data.paths import N02_GML_ROOT, N02_XML_PATH, N02_ZIP_PATH
 
 from .models import Coord, RawSection, RawStation, RouteKey
 
@@ -19,6 +19,14 @@ XLINK_NS = "http://www.w3.org/1999/xlink"
 GML_ID = f"{{{GML_NS}}}id"
 XLINK_HREF = f"{{{XLINK_NS}}}href"
 KSJ = f"{{{KSJ_NS}}}"
+
+# The official N02-24 UTF-8 XML contains two corrupted station labels.  Match
+# both stationCode and the bad source value so explicit inputs from other N02
+# releases are not changed accidentally.
+N02_24_STATION_NAME_FIXES = {
+    ("003484", "??J"): "茗荷谷",
+    ("005146", "壓c"): "螢田",
+}
 
 
 def local_name(tag: str) -> str:
@@ -55,14 +63,15 @@ def locate_input(explicit_path: Path | None) -> Path:
             raise FileNotFoundError(f"入力が見つかりません: {path}")
         return path
 
-    candidates = sorted(RAW_DATA_ROOT.glob("N02-*_GML/UTF-8/N02-*.xml"))
-    if candidates:
-        return candidates[-1]
-    candidates = sorted(RAW_DATA_ROOT.glob("N02-*_GML.zip"))
-    if candidates:
-        return candidates[-1]
+    if N02_XML_PATH.is_file():
+        return N02_XML_PATH
+    if N02_GML_ROOT.is_dir():
+        return N02_GML_ROOT
+    if N02_ZIP_PATH.is_file():
+        return N02_ZIP_PATH
     raise FileNotFoundError(
-        "N02 XML/ZIP を検出できません。--input で指定してください。"
+        f"{N02_XML_PATH} または {N02_ZIP_PATH} を検出できません。"
+        "python3 setup.py を実行するか、--input で指定してください。"
     )
 
 
@@ -83,8 +92,8 @@ def open_n02_xml(path: Path) -> Iterator[BinaryIO]:
             names = sorted(
                 name
                 for name in archive.namelist()
-                if "/UTF-8/" in name
-                and Path(name).name.startswith("N02-")
+                if "UTF-8" in PurePosixPath(name).parts
+                and PurePosixPath(name).name.startswith("N02-")
                 and name.endswith(".xml")
             )
             if not names:
@@ -139,13 +148,17 @@ def parse_n02(
                 element.clear()
             elif name == "Station":
                 location = child_refs(element, "location")
+                station_code = child_text(element, "stationCode")
+                station_name = child_text(element, "stationName")
                 stations.append(
                     RawStation(
                         source_id=element.get(GML_ID, ""),
                         curve_id=location[0] if location else "",
                         route_key=route_key(element),
-                        name=child_text(element, "stationName"),
-                        station_code=child_text(element, "stationCode"),
+                        name=N02_24_STATION_NAME_FIXES.get(
+                            (station_code, station_name), station_name
+                        ),
+                        station_code=station_code,
                         group_code=child_text(element, "groupCode"),
                         section_refs=child_refs(element, "railroadSection"),
                     )

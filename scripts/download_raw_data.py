@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 # place; set it when a fixed, reproducible snapshot is required.
 # ---------------------------------------------------------------------------
 
-N02_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/N02/N02-25/N02-25_GML.zip"
+N02_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/N02/N02-24/N02-24_GML.zip"
 S12_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-25/S12-25_GML.zip"
 
 EKIDATA_JOIN_URL = "https://ekidata.jp/dl/f.php?t=6&d=20260618"
@@ -53,9 +53,9 @@ class Download:
 DOWNLOADS: dict[str, tuple[Download, ...]] = {
     "n02": (
         Download(
-            name="国土数値情報 N02-25 鉄道データ",
+            name="国土数値情報 N02-24 鉄道データ",
             url=N02_URL,
-            destination=RAW_DATA_DIR / "N02-25_GML",
+            destination=RAW_DATA_DIR / "N02-24_GML",
             archive=True,
         ),
     ),

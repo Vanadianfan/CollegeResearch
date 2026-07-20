@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This project converts Japan MLIT N02-25 railway GML into a compact,
+This project converts Japan MLIT N02-24 railway GML into a compact,
 topology-preserving SQLite network and provides an interactive verifier.
 The build entry point is `python -m rail_data.build.main`. Build
 implementation and `correction.txt` live under `rail_data/build/`; the
@@ -43,9 +43,11 @@ installs `requirements.txt`, and downloads the public raw datasets.
   `direction='forward'` rows. Query distance by the indexed pair
   `(from_anchor_id, to_anchor_id)`; never assume the reverse distance is equal.
 - Apply `correction.txt` after raw topology compression and before calculating
-  station connections. `UM 382220 12060- 12061+ 12054-` unfolds the Yurikamome
+  station connections. `UM 382288 12053- 12054+ 12047-` unfolds the Yurikamome
   loop and merges the forced path. Full-build IDs are not valid in
   `--line-name` subset builds.
+- N02-24 source labels `stationCode=003484` and `005146` are repaired from the
+  corrupted XML values to `茗荷谷` and `螢田` during parsing.
 
 ## Build and verification workflow
 
@@ -59,9 +61,9 @@ installs `requirements.txt`, and downloads the public raw datasets.
   .venv/bin/python -m visualizers.network_db /private/tmp/rail-network-test.sqlite --check-only
   ```
 
-- Preserve unrelated user files and changes. Treat the two known unmatched
-  stations (敦賀 and 箕面船場阪大前) as warnings unless their source matching is
-  deliberately fixed.
+- Preserve unrelated user files and changes. Treat the four known unmatched
+  stations (敦賀, 放出, 鴫野, and 箕面船場阪大前) as warnings unless their source
+  matching is deliberately fixed.
 
 ## Visualizer contract
 

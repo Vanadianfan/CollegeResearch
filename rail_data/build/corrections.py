@@ -49,7 +49,7 @@ def load_corrections(path: Path) -> list[UnfoldMergeCorrection]:
         for token in fields[2:]:
             if len(token) < 2 or token[-1] not in "+-" or not token[:-1].isdigit():
                 raise ValueError(
-                    f"{correction_path}:{line_no}: 辺は 12060+ または 12060- "
+                    f"{correction_path}:{line_no}: 辺は 123+ または 123- "
                     f"の形式で指定してください: {token!r}"
                 )
             edge_refs.append((int(token[:-1]), int(token[-1] == "+")))
@@ -319,4 +319,3 @@ def apply_unfold_merge_corrections(
         )
 
     return applied, skipped
-

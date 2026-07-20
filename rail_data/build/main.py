@@ -30,12 +30,12 @@ DEFAULT_CORRECTIONS = Path(__file__).with_name("correction.txt")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="N02 GML を路線別の鉄道トポロジ SQLite に変換します。"
+        description="N02-24 GML を路線別の鉄道トポロジ SQLite に変換します。"
     )
     parser.add_argument(
         "--input",
         type=Path,
-        help="N02 XML、N02 ZIP、または N02-*_GML ディレクトリ",
+        help="N02-24 XML、ZIP、または N02-24_GML ディレクトリ",
     )
     parser.add_argument(
         "--output",
