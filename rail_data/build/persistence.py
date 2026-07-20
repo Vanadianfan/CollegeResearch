@@ -13,6 +13,7 @@ from .models import (
     NodeRow,
     RouteKey,
     SegmentRow,
+    StationGroupRow,
     StationRow,
 )
 
@@ -26,7 +27,7 @@ def create_schema(connection: sqlite3.Connection) -> None:
         -- otherwise be left behind under the temporary name.
         PRAGMA journal_mode = DELETE;
         PRAGMA synchronous = NORMAL;
-        PRAGMA user_version = 7;
+        PRAGMA user_version = 8;
 
         CREATE TABLE rail_line (
             id INTEGER PRIMARY KEY,
@@ -51,7 +52,8 @@ def create_schema(connection: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY,
             group_code TEXT NOT NULL UNIQUE,
             display_name TEXT NOT NULL,
-            station_count INTEGER NOT NULL
+            station_count INTEGER NOT NULL,
+            passengers INTEGER CHECK(passengers IS NULL OR passengers >= 0)
         );
 
         CREATE TABLE station (
@@ -182,6 +184,7 @@ def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> Non
     line_components: list[LineComponentRow] = model["line_components"]  # type: ignore[assignment]
     graph_edges: list[GraphEdgeRow] = model["graph_edges"]  # type: ignore[assignment]
     connections: list[ConnectionRow] = model["connections"]  # type: ignore[assignment]
+    group_rows: list[StationGroupRow] = model["group_rows"]  # type: ignore[assignment]
     connection.executemany(
         "INSERT INTO rail_line VALUES (?, ?, ?, ?, ?)",
         [
@@ -196,7 +199,21 @@ def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> Non
         ],
     )
     connection.executemany(
-        "INSERT INTO station_group VALUES (?, ?, ?, ?)", model["group_rows"]
+        """
+        INSERT INTO station_group (
+            id, group_code, display_name, station_count, passengers
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                row.id,
+                row.group_code,
+                row.display_name,
+                row.station_count,
+                row.passengers,
+            )
+            for row in group_rows
+        ],
     )
     connection.executemany(
         """
@@ -379,6 +396,15 @@ def validate_database(connection: sqlite3.Connection) -> None:
     if station_source_errors:
         raise RuntimeError(
             f"station.source_id が空です: {station_source_errors[:5]}"
+        )
+
+    invalid_passenger_rows = connection.execute(
+        "SELECT id, passengers FROM station_group WHERE passengers < 0"
+    ).fetchall()
+    if invalid_passenger_rows:
+        raise RuntimeError(
+            "station_group.passengers が負数です: "
+            f"{invalid_passenger_rows[:5]}"
         )
 
     edge_errors = connection.execute(

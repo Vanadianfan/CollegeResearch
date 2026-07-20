@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,7 @@ class StationGroupRecord:
     group_code: str
     display_name: str
     station_count: int
+    passengers: int | None
 
 
 @dataclass(frozen=True, slots=True)

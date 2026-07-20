@@ -35,6 +35,7 @@ from .models import (
     RawStation,
     RouteKey,
     SegmentRow,
+    StationGroupRow,
     StationRow,
     UnfoldMergeCorrection,
 )
@@ -697,14 +698,19 @@ def build_database_model(
         connection.id = connection_id
         connections.append(connection)
 
-    group_rows = []
+    group_rows: list[StationGroupRow] = []
     station_count_by_group = Counter(row.group_id for row in station_rows)
     for group_code in group_codes:
         group_id = group_id_by_code[group_code]
         counts = group_name_counts[group_code]
         display_name = counts.most_common(1)[0][0] if counts else group_code
         group_rows.append(
-            (group_id, group_code, display_name, station_count_by_group[group_id])
+            StationGroupRow(
+                id=group_id,
+                group_code=group_code,
+                display_name=display_name,
+                station_count=station_count_by_group[group_id],
+            )
         )
 
     return {

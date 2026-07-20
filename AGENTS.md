@@ -2,8 +2,8 @@
 
 ## Purpose
 
-This project converts Japan MLIT N02-24 railway GML into a compact,
-topology-preserving SQLite network and provides an interactive verifier.
+This project converts Japan MLIT N02-24 railway GML and S12-25 passenger data
+into a compact, topology-preserving SQLite network and provides an interactive verifier.
 The build entry point is `python -m rail_data.build.main`. Build
 implementation and `correction.txt` live under `rail_data/build/`; the
 downstream read-only data contract lives under `rail_data/schema/`.
@@ -23,6 +23,11 @@ installs `requirements.txt`, and downloads the public raw datasets.
   stored once as ordered `atomic_segment` rows.
 - Preserve route/operator-specific `station` rows. `station_group` / N02
   `groupCode` is membership only; it is not proof of transfer connectivity.
+- `station_group.passengers` is the S12-25 2024 daily boarding-plus-alighting
+  group total. Sum only distinct `duplicate2024=1`, `dataEorN2024=1` primary
+  observations; exclude `duplicate2024=2`. If any primary observation is
+  missing/nonpublic, or only a duplicate reference is found, store `NULL`
+  rather than a partial total. It is not a count of unique people.
 - `station.source_id` is the source Station `gml:id`; keep source codes as
   `TEXT` so leading zeros survive.
 - `network_node` owns coordinates. Junction status is derived from topology;
@@ -34,7 +39,7 @@ installs `requirements.txt`, and downloads the public raw datasets.
 
 ## Current network rules
 
-- SQLite schema version is 7. In `station_connection`, keep
+- SQLite schema version is 8. In `station_connection`, keep
   `to_station_offset_m` immediately after `from_station_offset_m`, followed by
   `gap_length_m`.
 - `graph_edge.direction` is enforced during routing. Strict degree-3 bubbles
@@ -54,6 +59,11 @@ installs `requirements.txt`, and downloads the public raw datasets.
 - A normal build atomically replaces the requested DB. During agent testing,
   write to `/private/tmp`; do not overwrite `rail_network.sqlite` unless the
   user explicitly asks.
+- Every build must run the independent passenger reverse validator after the
+  temporary DB is populated and before atomic replacement. It must reject a
+  `NULL` group when complete primary S12 data can be reconstructed, as well as
+  any non-NULL value that cannot be independently reproduced. The standalone
+  entry point is `python -m rail_data.build.passenger_validation`.
 - Run:
 
   ```bash

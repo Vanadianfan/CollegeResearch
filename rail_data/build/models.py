@@ -34,6 +34,28 @@ class RawStation:
     section_refs: list[str]
 
 
+@dataclass(frozen=True)
+class RawPassengerStation:
+    source_id: str
+    curve_id: str
+    route_key: RouteKey
+    name: str
+    station_code: str
+    group_code: str
+    duplicate_code: str
+    data_status_code: str
+    passengers: int | None
+
+
+@dataclass
+class StationGroupRow:
+    id: int
+    group_code: str
+    display_name: str
+    station_count: int
+    passengers: int | None = None
+
+
 @dataclass
 class StationRow:
     id: int
@@ -151,6 +173,23 @@ class ImportIssue:
     issue_code: str
     message: str
     details: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class PassengerAggregationSummary:
+    source_record_count: int
+    selected_group_count: int
+    available_group_count: int
+    incomplete_group_count: int
+    missing_primary_group_count: int
+    no_station_group_count: int
+    no_source_record_group_count: int
+    mapped_by_station_code: int
+    mapped_by_geometry: int
+    mapped_by_group_code: int
+    unmatched_active_record_count: int
+    ignored_duplicate_record_count: int
+    ignored_no_station_record_count: int
 
 
 @dataclass(frozen=True)

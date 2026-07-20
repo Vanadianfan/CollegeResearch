@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from rail_data.paths import PROJECT_ROOT
-from rail_data.schema import REQUIRED_TABLES
+from rail_data.schema import REQUIRED_TABLES, SCHEMA_VERSION
 
 
 @dataclass
@@ -71,6 +71,14 @@ def table_names(connection: sqlite3.Connection) -> set[str]:
 def validate_database(connection: sqlite3.Connection) -> list[CheckResult]:
     results: list[CheckResult] = []
     schema_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if schema_version != SCHEMA_VERSION:
+        return [
+            CheckResult(
+                "ERROR",
+                f"DB schema version={schema_version}；最新版は {SCHEMA_VERSION} です。"
+                " rail_data.build.main で再構築してください。",
+            )
+        ]
     missing = sorted(REQUIRED_TABLES - table_names(connection))
     if missing:
         return [CheckResult("ERROR", f"缺少必要資料表: {', '.join(missing)}")]
@@ -82,6 +90,16 @@ def validate_database(connection: sqlite3.Connection) -> list[CheckResult]:
             CheckResult(
                 "ERROR",
                 "station 缺少 source_id；請用最新版 rail_data.build.main 重建 DB",
+            )
+        ]
+    group_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(station_group)")
+    }
+    if "passengers" not in group_columns:
+        return [
+            CheckResult(
+                "ERROR",
+                "station_group に passengers がありません。最新版の build で再構築してください。",
             )
         ]
 
@@ -220,9 +238,7 @@ def validate_database(connection: sqlite3.Connection) -> list[CheckResult]:
             )
             """
         ).fetchone()[0]
-        directional_errors = (
-            invalid_connection_directions + missing_reverse_connections
-        )
+        directional_errors = invalid_connection_directions + missing_reverse_connections
         results.append(
             CheckResult(
                 "ERROR" if directional_errors else "OK",
@@ -361,6 +377,28 @@ def validate_database(connection: sqlite3.Connection) -> list[CheckResult]:
         )
     )
 
+    invalid_passenger_groups = connection.execute(
+        "SELECT COUNT(*) FROM station_group WHERE passengers < 0"
+    ).fetchone()[0]
+    available_passenger_groups, missing_passenger_groups = connection.execute(
+        """
+        SELECT COUNT(passengers), COUNT(*) - COUNT(passengers)
+        FROM station_group
+        """
+    ).fetchone()
+    results.append(
+        CheckResult(
+            "ERROR" if invalid_passenger_groups else "OK",
+            f"station_group.passengers に負数 {invalid_passenger_groups} 件"
+            if invalid_passenger_groups
+            else (
+                "2024年乗降客数: "
+                f"利用可能 {available_passenger_groups} 組 / "
+                f"欠測 {missing_passenger_groups} 組"
+            ),
+        )
+    )
+
     return results
 
 
@@ -439,17 +477,21 @@ def count_connection_path_errors(connection: sqlite3.Connection) -> int:
     return errors
 
 
-def sql_filter(line_ids: list[int] | None, alias: str) -> tuple[str, list[int]]:
+def sql_filter(
+    line_ids: list[int] | None,
+    alias: str,
+    column: str = "line_id",
+) -> tuple[str, list[int]]:
     if not line_ids:
         return "", []
     placeholders = ", ".join("?" for _ in line_ids)
-    return f" AND {alias}.line_id IN ({placeholders})", line_ids
+    return f" AND {alias}.{column} IN ({placeholders})", line_ids
 
 
 def load_visual_data(
     connection: sqlite3.Connection, line_ids: list[int] | None
 ) -> dict[str, Any]:
-    line_where, line_parameters = sql_filter(line_ids, "l")
+    line_where, line_parameters = sql_filter(line_ids, "l", "id")
     lines = [
         {
             "id": row[0],
@@ -531,10 +573,12 @@ def load_visual_data(
             "station_code": row[5],
             "station_name": row[6],
             "group": row[7],
-            "group_name": row[8],
-            "line": row[9],
-            "line_name": row[10],
-            "topology": row[11],
+            "group_code": row[8],
+            "group_name": row[9],
+            "passengers": row[10],
+            "line": row[11],
+            "line_name": row[12],
+            "topology": row[13],
         }
         for row in connection.execute(
             """
@@ -552,7 +596,7 @@ def load_visual_data(
             SELECT
                 ra.node_id, n.lon, n.lat,
                 s.id, s.source_id, s.station_code, s.name,
-                g.id, g.display_name,
+                g.id, g.group_code, g.display_name, g.passengers,
                 s.line_id, l.name, n.topology_type
             FROM ranked_anchor AS ra
             JOIN station AS s ON s.id = ra.station_id
@@ -1078,8 +1122,13 @@ canvas.dragging { cursor: grabbing; }
       const members = stationsByGroup.get(station.group) || [station];
       const routes = [...new Set(members.map(member => member.line_name))].join("、");
       const suffix = station.topology === "junction" ? "（分岐を兼ねる）" : "";
+      const passengers = station.passengers === null
+        ? "欠測（完全な組合計を確定できません）"
+        : `${station.passengers.toLocaleString("ja-JP")} 人/日`;
       detail.textContent = [
         `${station.group_name}（グループ #${station.group}）`,
+        `グループコード：${station.group_code}`,
+        `2024年1日あたり乗降客数：${passengers}`,
         `同グループの表示駅：${members.length}件`,
         `路線：${routes}`,
         `対象駅：${station.line_name}・${station.station_name}${suffix}`,

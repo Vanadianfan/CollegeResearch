@@ -17,10 +17,16 @@ from .geometry import DEFAULT_POINT_ON_SEGMENT_TOLERANCE
 from .models import (
     AppliedCorrection,
     ImportIssue,
+    PassengerAggregationSummary,
     ParallelDirectionAssignment,
     ParallelDirectionSkip,
     UnfoldMergeCorrection,
 )
+from .passenger_validation import (
+    print_validation_summary,
+    validate_station_group_passengers,
+)
+from .passengers import apply_group_passengers, locate_s12_input, parse_s12_2024
 from .persistence import create_schema, validate_database, write_model
 from .source import locate_input, parse_n02
 
@@ -30,7 +36,10 @@ DEFAULT_CORRECTIONS = Path(__file__).with_name("correction.txt")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="N02-24 GML を路線別の鉄道トポロジ SQLite に変換します。"
+        description=(
+            "N02-24 GML と S12-25 の2024年乗降客数を "
+            "路線別の鉄道トポロジ SQLite に変換します。"
+        )
     )
     parser.add_argument(
         "--input",
@@ -42,6 +51,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT / "rail_network.sqlite",
         help="出力 SQLite パス（既定: rail_network.sqlite）",
+    )
+    parser.add_argument(
+        "--s12-input",
+        type=Path,
+        help="S12-25 XML、ZIP、または S12-25_GML ディレクトリ",
     )
     parser.add_argument(
         "--line-name",
@@ -75,6 +89,7 @@ def print_summary(
     skipped_corrections: list[UnfoldMergeCorrection],
     parallel_direction_assignments: list[ParallelDirectionAssignment],
     parallel_direction_skips: list[ParallelDirectionSkip],
+    passenger_summary: PassengerAggregationSummary,
 ) -> None:
     tables = [
         "rail_line",
@@ -94,6 +109,34 @@ def print_summary(
     for table in tables:
         count = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         print(f"  {table}: {count:,}")
+    print(
+        "  S12-25 passengers "
+        f"({passenger_summary.source_record_count:,} source rows, 2024, "
+        "station_group.passengers):"
+    )
+    print(
+        f"    available: {passenger_summary.available_group_count:,} / "
+        f"{passenger_summary.selected_group_count:,} groups"
+    )
+    print(
+        "    NULL reasons: "
+        f"incomplete_primary={passenger_summary.incomplete_group_count:,}, "
+        f"primary_not_found={passenger_summary.missing_primary_group_count:,}, "
+        f"no_station={passenger_summary.no_station_group_count:,}, "
+        f"no_source_record={passenger_summary.no_source_record_group_count:,}"
+    )
+    print(
+        "    S12 mapping: "
+        f"stationCode={passenger_summary.mapped_by_station_code:,}, "
+        f"geometry={passenger_summary.mapped_by_geometry:,}, "
+        f"groupCode={passenger_summary.mapped_by_group_code:,}, "
+        f"unmatched_active={passenger_summary.unmatched_active_record_count:,}"
+    )
+    print(
+        "    excluded source rows: "
+        f"duplicate_elsewhere={passenger_summary.ignored_duplicate_record_count:,}, "
+        f"no_station={passenger_summary.ignored_no_station_record_count:,}"
+    )
     print(f"  corrections_applied: {len(applied_corrections):,}")
     for correction in applied_corrections:
         source_path = " ".join(
@@ -159,6 +202,7 @@ def print_summary(
 def main() -> None:
     args = parse_args()
     input_path = locate_input(args.input)
+    s12_input_path = locate_s12_input(args.s12_input)
     corrections = load_corrections(args.corrections)
     output_path = args.output.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -175,6 +219,12 @@ def main() -> None:
         f"解析: {len(curves):,} curves / {len(sections):,} sections / "
         f"{len(stations):,} station features"
     )
+    print(f"S12 読込: {s12_input_path}")
+    s12_curves, s12_stations = parse_s12_2024(s12_input_path)
+    print(
+        f"S12 解析: {len(s12_curves):,} curves / "
+        f"{len(s12_stations):,} passenger features (2024)"
+    )
     selected_line_names = None if not args.line_name else set(args.line_name)
     model = build_database_model(
         curves,
@@ -183,6 +233,13 @@ def main() -> None:
         selected_line_names,
         args.point_tolerance,
         corrections,
+    )
+    passenger_summary = apply_group_passengers(
+        model,
+        curves,
+        stations,
+        s12_curves,
+        s12_stations,
     )
 
     temp_fd, temp_name = tempfile.mkstemp(
@@ -196,6 +253,13 @@ def main() -> None:
             with connection:
                 write_model(connection, model)
                 validate_database(connection)
+            passenger_validation_summary = validate_station_group_passengers(
+                connection,
+                curves,
+                stations,
+                s12_curves,
+                s12_stations,
+            )
             issues: list[ImportIssue] = model["issues"]  # type: ignore[assignment]
             applied_corrections: list[AppliedCorrection] = model[
                 "applied_corrections"
@@ -217,7 +281,9 @@ def main() -> None:
                 skipped_corrections,
                 parallel_direction_assignments,
                 parallel_direction_skips,
+                passenger_summary,
             )
+            print_validation_summary(passenger_validation_summary)
         os.replace(temp_path, output_path)
     finally:
         if temp_path.exists():
