@@ -81,6 +81,9 @@ installs `requirements.txt`, and downloads the public raw datasets.
   labels near member stations, and edge distances.
 - Hovering a station highlights every displayed member of its group by color
   only; do not enlarge nodes.
+- Hovering coincident, locally parallel graph edges highlights all matching
+  edges and lists every distinct displayed rail line. Treat this as geometric
+  overlap, not proof that the physical track is shared.
 - The page UI is Japanese. Prefer macOS Japanese fonts (`Hiragino Sans`,
   `Hiragino Kaku Gothic ProN`) and show detail-card fields on separate lines.
 - Station details include `station.source_id`. Preserve trackpad/touch pinch

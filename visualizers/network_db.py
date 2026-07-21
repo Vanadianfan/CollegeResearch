@@ -773,6 +773,9 @@ canvas.dragging { cursor: grabbing; }
   const styles = () => getComputedStyle(document.documentElement);
   const tau = Math.PI * 2;
   const maxMercatorLat = 85.05112878;
+  const edgeHitRadius = 12;
+  const coincidentEdgeTolerance = 0.75;
+  const parallelDirectionThreshold = Math.cos(15 * Math.PI / 180);
   const pointers = new Map();
   let dpr = 1;
   let width = 1;
@@ -1043,9 +1046,14 @@ canvas.dragging { cursor: grabbing; }
     return points[points.length - 1];
   }
 
+  function featureContains(feature, type, id) {
+    if (!feature || feature.type !== type) return false;
+    if (type === "edge" && feature.ids) return feature.ids.includes(id);
+    return feature.id === id;
+  }
+
   function isActive(type, id) {
-    return (selected && selected.type === type && selected.id === id) ||
-      (hovered && hovered.type === type && hovered.id === id);
+    return featureContains(selected, type, id) || featureContains(hovered, type, id);
   }
 
   function activeStationGroup() {
@@ -1071,7 +1079,7 @@ canvas.dragging { cursor: grabbing; }
 
   function nearestFeature(x, y) {
     let best = null;
-    let bestDistance = 12;
+    let bestDistance = edgeHitRadius;
     for (const station of data.stations) {
       const point = screen(station.world);
       const distance = Math.hypot(point[0] - x, point[1] - y);
@@ -1089,26 +1097,59 @@ canvas.dragging { cursor: grabbing; }
       }
     }
     if (best) return best;
+
+    const edgeCandidates = [];
     for (const edge of data.edges) {
-      if (!visibleBox(edge.box, bestDistance)) continue;
-      const points = edge.world.map(screen);
-      for (let i = 1; i < points.length; i += 1) {
-        const distance = pointSegmentDistance(x, y, points[i - 1], points[i]);
-        if (distance < bestDistance) {
-          bestDistance = distance;
-          best = { type: "edge", id: edge.id, item: edge };
-        }
-      }
+      if (!visibleBox(edge.box, edgeHitRadius)) continue;
+      const hit = nearestPointOnEdge(edge, x, y);
+      if (hit && hit.distance < edgeHitRadius) edgeCandidates.push({ edge, hit });
     }
-    return best;
+    if (edgeCandidates.length === 0) return null;
+
+    edgeCandidates.sort((a, b) => a.hit.distance - b.hit.distance || a.edge.id - b.edge.id);
+    const nearest = edgeCandidates[0];
+    const coincident = edgeCandidates.filter(candidate =>
+      candidate.hit.distance <= nearest.hit.distance + coincidentEdgeTolerance &&
+      directionsAreParallel(candidate.hit, nearest.hit)
+    );
+    const edges = coincident.map(candidate => candidate.edge);
+    return {
+      type: "edge",
+      id: edges[0].id,
+      ids: edges.map(edge => edge.id),
+      item: edges[0],
+      items: edges,
+    };
   }
 
-  function pointSegmentDistance(x, y, a, b) {
+  function nearestPointOnEdge(edge, x, y) {
+    const points = edge.world.map(screen);
+    let nearest = null;
+    for (let i = 1; i < points.length; i += 1) {
+      const hit = pointSegmentHit(x, y, points[i - 1], points[i]);
+      if (!nearest || hit.distance < nearest.distance) nearest = hit;
+    }
+    return nearest;
+  }
+
+  function pointSegmentHit(x, y, a, b) {
     const dx = b[0] - a[0];
     const dy = b[1] - a[1];
     const lengthSquared = dx * dx + dy * dy;
     const ratio = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / lengthSquared));
-    return Math.hypot(x - (a[0] + ratio * dx), y - (a[1] + ratio * dy));
+    return {
+      distance: Math.hypot(x - (a[0] + ratio * dx), y - (a[1] + ratio * dy)),
+      dx,
+      dy,
+    };
+  }
+
+  function directionsAreParallel(a, b) {
+    const aLength = Math.hypot(a.dx, a.dy);
+    const bLength = Math.hypot(b.dx, b.dy);
+    if (aLength === 0 || bLength === 0) return false;
+    const cosine = Math.abs((a.dx * b.dx + a.dy * b.dy) / (aLength * bLength));
+    return cosine >= parallelDirectionThreshold;
   }
 
   function updateDetail() {
@@ -1141,13 +1182,30 @@ canvas.dragging { cursor: grabbing; }
         `路線：${line ? line.name : "不明な路線"}`,
       ].join("\n");
     } else {
-      const edge = feature.item;
-      const line = lineById.get(edge.line);
-      detail.textContent = [
-        `接続 #${edge.id}`,
-        `路線：${line ? line.name : "不明な路線"}`,
-        `距離：${formatDistance(edge.distance)}`,
-      ].join("\n");
+      const edges = feature.items || [feature.item];
+      const lines = [];
+      const seenLineIds = new Set();
+      for (const edge of edges) {
+        if (seenLineIds.has(edge.line)) continue;
+        seenLineIds.add(edge.line);
+        const line = lineById.get(edge.line);
+        lines.push(line ? `${line.name}（${line.operator}）` : `不明な路線（ID ${edge.line}）`);
+      }
+      if (edges.length === 1) {
+        detail.textContent = [
+          `接続 #${edges[0].id}`,
+          `路線：${lines[0]}`,
+          `距離：${formatDistance(edges[0].distance)}`,
+        ].join("\n");
+      } else {
+        detail.textContent = [
+          `同位置の接続：${edges.length}件`,
+          "路線：",
+          ...lines.map(line => `・${line}`),
+          "接続と距離：",
+          ...edges.map(edge => `・#${edge.id}：${formatDistance(edge.distance)}`),
+        ].join("\n");
+      }
     }
   }
 
