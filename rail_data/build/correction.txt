@@ -2,3 +2,10 @@
 # + follows the stored graph_edge direction; - traverses it in reverse.
 # N02-24: 12053 downward -> 12054 clockwise loop -> 12047 leftward.
 UM 382288 12053- 12054+ 12047-
+
+# SM <junction_node> <edge_a>+<edge_b> <edge_c>+<edge_d>
+# Split a false degree-4 junction into two disconnected ordinary paths, then
+# merge each graph-edge pair. Edge order is not directional; traversal is
+# inferred.
+# N02-24: node 287467 is not a branch; keep 3528-3521 and 3526-3529 separate.
+SM 287467 3528+3521 3526+3529

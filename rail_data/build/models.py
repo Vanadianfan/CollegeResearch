@@ -200,6 +200,16 @@ class UnfoldMergeCorrection:
 
 
 @dataclass(frozen=True)
+class SplitMergeCorrection:
+    line_no: int
+    junction_node_id: int
+    edge_pairs: tuple[tuple[int, int], tuple[int, int]]
+
+
+Correction = UnfoldMergeCorrection | SplitMergeCorrection
+
+
+@dataclass(frozen=True)
 class AppliedCorrection:
     line_no: int
     junction_node_id: int
@@ -207,6 +217,19 @@ class AppliedCorrection:
     merged_edge_id: int
     split_node_id: int
     distance_m: float
+
+
+@dataclass(frozen=True)
+class AppliedSplitMergeCorrection:
+    line_no: int
+    junction_node_id: int
+    source_edge_pairs: tuple[tuple[int, int], tuple[int, int]]
+    merged_edge_ids: tuple[int, int]
+    split_node_id: int
+    distance_ms: tuple[float, float]
+
+
+AppliedCorrectionResult = AppliedCorrection | AppliedSplitMergeCorrection
 
 
 @dataclass(frozen=True)

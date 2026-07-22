@@ -15,12 +15,14 @@ from .builder import build_database_model
 from .corrections import load_corrections
 from .geometry import DEFAULT_POINT_ON_SEGMENT_TOLERANCE
 from .models import (
-    AppliedCorrection,
+    AppliedCorrectionResult,
+    AppliedSplitMergeCorrection,
+    Correction,
     ImportIssue,
     PassengerAggregationSummary,
     ParallelDirectionAssignment,
     ParallelDirectionSkip,
-    UnfoldMergeCorrection,
+    SplitMergeCorrection,
 )
 from .passenger_validation import (
     print_validation_summary,
@@ -85,8 +87,8 @@ def print_summary(
     connection: sqlite3.Connection,
     output_path: Path,
     issues: list[ImportIssue],
-    applied_corrections: list[AppliedCorrection],
-    skipped_corrections: list[UnfoldMergeCorrection],
+    applied_corrections: list[AppliedCorrectionResult],
+    skipped_corrections: list[Correction],
     parallel_direction_assignments: list[ParallelDirectionAssignment],
     parallel_direction_skips: list[ParallelDirectionSkip],
     passenger_summary: PassengerAggregationSummary,
@@ -139,21 +141,41 @@ def print_summary(
     )
     print(f"  corrections_applied: {len(applied_corrections):,}")
     for correction in applied_corrections:
-        source_path = " ".join(
-            f"{edge_id}{'+' if forward else '-'}"
-            for edge_id, forward in correction.source_edge_refs
-        )
-        print(
-            f"    line {correction.line_no}: UM node={correction.junction_node_id} "
-            f"path={source_path} -> graph_edge#{correction.merged_edge_id}, "
-            f"split_node#{correction.split_node_id}, "
-            f"distance={correction.distance_m:.3f}m"
-        )
+        if isinstance(correction, AppliedSplitMergeCorrection):
+            source_pairs = " ".join(
+                f"{first}+{second}"
+                for first, second in correction.source_edge_pairs
+            )
+            merged = ", ".join(
+                f"graph_edge#{edge_id} ({distance_m:.3f}m)"
+                for edge_id, distance_m in zip(
+                    correction.merged_edge_ids, correction.distance_ms
+                )
+            )
+            print(
+                f"    line {correction.line_no}: SM "
+                f"node={correction.junction_node_id} pairs={source_pairs} -> "
+                f"{merged}, split_node#{correction.split_node_id}"
+            )
+        else:
+            source_path = " ".join(
+                f"{edge_id}{'+' if forward else '-'}"
+                for edge_id, forward in correction.source_edge_refs
+            )
+            print(
+                f"    line {correction.line_no}: UM "
+                f"node={correction.junction_node_id} path={source_path} -> "
+                f"graph_edge#{correction.merged_edge_id}, "
+                f"split_node#{correction.split_node_id}, "
+                f"distance={correction.distance_m:.3f}m"
+            )
     if skipped_corrections:
         print(f"  corrections_skipped: {len(skipped_corrections):,}")
         for correction in skipped_corrections:
+            command = "SM" if isinstance(correction, SplitMergeCorrection) else "UM"
             print(
-                f"    line {correction.line_no}: UM node={correction.junction_node_id} "
+                f"    line {correction.line_no}: {command} "
+                f"node={correction.junction_node_id} "
                 "(--line-name build では完全版DBのIDを解決できないため)"
             )
     print(
@@ -261,10 +283,10 @@ def main() -> None:
                 s12_stations,
             )
             issues: list[ImportIssue] = model["issues"]  # type: ignore[assignment]
-            applied_corrections: list[AppliedCorrection] = model[
+            applied_corrections: list[AppliedCorrectionResult] = model[
                 "applied_corrections"
             ]  # type: ignore[assignment]
-            skipped_corrections: list[UnfoldMergeCorrection] = model[
+            skipped_corrections: list[Correction] = model[
                 "skipped_corrections"
             ]  # type: ignore[assignment]
             parallel_direction_assignments: list[ParallelDirectionAssignment] = model[

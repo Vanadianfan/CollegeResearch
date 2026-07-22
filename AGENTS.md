@@ -49,8 +49,9 @@ installs `requirements.txt`, and downloads the public raw datasets.
   `(from_anchor_id, to_anchor_id)`; never assume the reverse distance is equal.
 - Apply `correction.txt` after raw topology compression and before calculating
   station connections. `UM 382288 12053- 12054+ 12047-` unfolds the Yurikamome
-  loop and merges the forced path. Full-build IDs are not valid in
-  `--line-name` subset builds.
+  loop and merges the forced path. `SM 287467 3528+3521 3526+3529` splits a
+  false Tokaido junction into two disconnected ordinary paths and merges each
+  edge pair. Full-build IDs are not valid in `--line-name` subset builds.
 - N02-24 source labels `stationCode=003484` and `005146` are repaired from the
   corrupted XML values to `茗荷谷` and `螢田` during parsing.
 

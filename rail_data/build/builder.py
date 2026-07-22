@@ -6,7 +6,7 @@ import heapq
 import math
 from collections import Counter, defaultdict, deque
 
-from .corrections import apply_unfold_merge_corrections
+from .corrections import apply_corrections
 from .directions import assign_left_running_parallel_directions
 from .geometry import (
     add_split,
@@ -25,6 +25,7 @@ from .models import (
     AnchorRow,
     ComponentDraft,
     ConnectionRow,
+    Correction,
     Coord,
     GraphEdgeRow,
     ImportIssue,
@@ -37,7 +38,6 @@ from .models import (
     SegmentRow,
     StationGroupRow,
     StationRow,
-    UnfoldMergeCorrection,
 )
 
 
@@ -69,7 +69,7 @@ def build_database_model(
     raw_stations: list[RawStation],
     selected_line_names: set[str] | None,
     point_tolerance: float,
-    corrections: list[UnfoldMergeCorrection],
+    corrections: list[Correction],
 ) -> dict[str, object]:
     issues: list[ImportIssue] = []
     selected_sections = [
@@ -538,7 +538,7 @@ def build_database_model(
                 )
             )
 
-    applied_corrections, skipped_corrections = apply_unfold_merge_corrections(
+    applied_corrections, skipped_corrections = apply_corrections(
         corrections,
         nodes,
         segments,
