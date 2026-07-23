@@ -495,12 +495,15 @@ def load_visual_data(
     lines = [
         {
             "id": row[0],
-            "name": row[1],
-            "operator": row[2],
+            "railway_type_code": row[1],
+            "provider_type_code": row[2],
+            "name": row[3],
+            "operator": row[4],
         }
         for row in connection.execute(
             """
-            SELECT l.id, l.name, l.operator_name
+            SELECT l.id, l.railway_type_code, l.provider_type_code,
+                   l.name, l.operator_name
             FROM rail_line AS l
             WHERE 1 = 1
             """
@@ -532,6 +535,7 @@ def load_visual_data(
         + " ORDER BY ge.id, relation.sequence_no"
     )
     edges_by_id: dict[int, dict[str, Any]] = {}
+    edge_ids_by_node: dict[int, set[int]] = {}
     for row in connection.execute(edge_query, edge_parameters):
         (
             edge_id,
@@ -558,6 +562,8 @@ def load_visual_data(
         start, end = (
             (segment_from, segment_to) if forward else (segment_to, segment_from)
         )
+        edge_ids_by_node.setdefault(start, set()).add(edge_id)
+        edge_ids_by_node.setdefault(end, set()).add(edge_id)
         if not item["points"]:
             item["points"].append(node_coords[start])
         item["points"].append(node_coords[end])
@@ -610,6 +616,8 @@ def load_visual_data(
             station_parameters,
         )
     ]
+    for station in stations:
+        station["graph_edges"] = sorted(edge_ids_by_node.get(station["node"], ()))
 
     junction_where, junction_parameters = sql_filter(line_ids, "n")
     junctions = [
@@ -666,6 +674,12 @@ HTML_TEMPLATE = r"""<!doctype html>
   --junction: #166e7a;
   --selected: #e69121;
   --grid: rgba(23, 33, 43, .08);
+  --route-1: #d53f55;
+  --route-2: #2673c7;
+  --route-3: #16855a;
+  --route-4: #8454bd;
+  --route-5: #c56d0a;
+  --route-6: #008591;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -679,6 +693,12 @@ HTML_TEMPLATE = r"""<!doctype html>
     --junction: #62c4d0;
     --selected: #ffc56b;
     --grid: rgba(232, 237, 241, .07);
+    --route-1: #ff7184;
+    --route-2: #69a9f4;
+    --route-3: #4fd39a;
+    --route-4: #bd8df1;
+    --route-5: #ffae52;
+    --route-6: #53c9d2;
   }
 }
 * { box-sizing: border-box; }
@@ -727,10 +747,60 @@ canvas.dragging { cursor: grabbing; }
   pointer-events: none;
   white-space: pre-line;
 }
-.reset {
+.detail.route-detail {
+  width: min(440px, calc(100% - 24px));
+  max-height: min(66vh, 620px);
+  overflow-y: auto;
+  white-space: normal;
+}
+.route-detail-heading { font-weight: 600; }
+.route-detail-summary { margin-top: 2px; color: var(--muted); }
+.route-entry {
+  margin-top: 9px;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--route-color);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 92%, var(--route-color));
+}
+.route-entry-title { display: flex; align-items: center; gap: 7px; font-weight: 600; }
+.route-swatch { width: 12px; height: 4px; border-radius: 3px; background: var(--route-color); }
+.route-entry dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 8px; margin: 5px 0 0; }
+.route-entry dt { color: var(--muted); }
+.route-entry dd { margin: 0; overflow-wrap: anywhere; }
+.route-color-1 { --route-color: var(--route-1); }
+.route-color-2 { --route-color: var(--route-2); }
+.route-color-3 { --route-color: var(--route-3); }
+.route-color-4 { --route-color: var(--route-4); }
+.route-color-5 { --route-color: var(--route-5); }
+.route-color-6 { --route-color: var(--route-6); }
+.top-controls {
   position: absolute;
   right: 12px;
   top: 12px;
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+.route-mode-control {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  max-width: min(290px, calc(100vw - 24px));
+  padding: 9px 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  backdrop-filter: blur(8px);
+  cursor: pointer;
+}
+.route-mode-control:hover { border-color: color-mix(in srgb, var(--foreground) 42%, transparent); }
+.route-mode-control:has(input:focus-visible) { outline: 2px solid var(--selected); outline-offset: 2px; }
+.route-mode-copy { display: grid; flex: 1; }
+.route-mode-copy strong { font-weight: 600; }
+.route-mode-copy small { color: var(--muted); }
+.route-mode-control input { width: 19px; height: 19px; margin: 0; accent-color: var(--selected); cursor: pointer; }
+.reset {
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
@@ -741,9 +811,12 @@ canvas.dragging { cursor: grabbing; }
 }
 .reset:focus-visible { outline: 2px solid var(--selected); outline-offset: 2px; }
 @media (max-width: 520px) {
-  .hud { right: 12px; max-width: none; }
-  .reset { top: auto; bottom: 12px; left: 12px; right: auto; }
-  .detail { left: 12px; bottom: 54px; max-width: none; }
+  .hud { right: 12px; top: 160px; max-width: none; }
+  .top-controls { left: 12px; justify-items: stretch; }
+  .route-mode-control { max-width: none; }
+  .reset { justify-self: end; }
+  .detail { left: 12px; bottom: 12px; max-width: none; }
+  .detail.route-detail { width: auto; max-height: 50vh; }
 }
 </style>
 </head>
@@ -758,7 +831,16 @@ canvas.dragging { cursor: grabbing; }
     <span><i class="dot line-dot"></i>接続</span>
   </div>
 </section>
-<button class="reset" id="reset" type="button">全体を表示</button>
+<div class="top-controls">
+  <label class="route-mode-control" for="route-mode">
+    <span class="route-mode-copy">
+      <strong>路線モードを開きますか？</strong>
+      <small>命中した路線全体を色分けして確認</small>
+    </span>
+    <input id="route-mode" type="checkbox">
+  </label>
+  <button class="reset" id="reset" type="button">全体を表示</button>
+</div>
 <aside class="detail" id="detail" aria-live="polite">ノードまたは接続にカーソルを合わせるか、クリックすると詳細を表示します。</aside>
 <script id="network-data" type="application/json">__NETWORK_DATA__</script>
 <script>
@@ -770,6 +852,7 @@ canvas.dragging { cursor: grabbing; }
   const detail = document.getElementById("detail");
   const counts = document.getElementById("counts");
   const resetButton = document.getElementById("reset");
+  const routeModeToggle = document.getElementById("route-mode");
   const styles = () => getComputedStyle(document.documentElement);
   const tau = Math.PI * 2;
   const maxMercatorLat = 85.05112878;
@@ -786,9 +869,12 @@ canvas.dragging { cursor: grabbing; }
   let pinchOrigin = null;
   let hovered = null;
   let selected = null;
+  let routeMode = false;
   let framePending = false;
 
   const lineById = new Map(data.lines.map(line => [line.id, line]));
+  const edgeById = new Map(data.edges.map(edge => [edge.id, edge]));
+  const edgesByLine = new Map();
   const stationNodes = new Set(data.stations.map(station => station.node));
   const stationsByGroup = new Map();
   data.edges.forEach(edge => {
@@ -796,6 +882,9 @@ canvas.dragging { cursor: grabbing; }
     const xs = edge.world.map(point => point[0]);
     const ys = edge.world.map(point => point[1]);
     edge.box = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    const lineEdges = edgesByLine.get(edge.line) || [];
+    lineEdges.push(edge);
+    edgesByLine.set(edge.line, lineEdges);
   });
   data.stations.forEach(station => {
     station.world = project(station.lon, station.lat);
@@ -915,11 +1004,11 @@ canvas.dragging { cursor: grabbing; }
     const selectedColor = css.getPropertyValue("--selected");
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    for (const edge of data.edges) {
-      if (!visibleBox(edge.box)) continue;
-      const active = isActive("edge", edge.id);
-      ctx.strokeStyle = active ? selectedColor : rail;
-      ctx.lineWidth = active ? 3.2 : 1.25;
+
+    function strokeEdge(edge, color, lineWidth) {
+      if (!visibleBox(edge.box)) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
       ctx.beginPath();
       edge.world.forEach((point, index) => {
         const [x, y] = screen(point);
@@ -927,18 +1016,71 @@ canvas.dragging { cursor: grabbing; }
       });
       ctx.stroke();
     }
+
+    for (const edge of data.edges) {
+      const active = !routeMode && isActive("edge", edge.id);
+      strokeEdge(edge, active ? selectedColor : rail, active ? 3.2 : 1.25);
+    }
+
+    if (!routeMode) return;
+    const match = routeMatch(hovered || selected);
+    match.lineIds.forEach((lineId, index) => {
+      const widthOffset = (match.lineIds.length - index - 1) * 1.45;
+      const color = css.getPropertyValue(`--route-${index % 6 + 1}`);
+      for (const edge of edgesByLine.get(lineId) || []) {
+        strokeEdge(edge, color, 3.4 + widthOffset);
+      }
+    });
+  }
+
+  function routeMatch(feature) {
+    const edges = [];
+    const stations = [];
+    if (feature && feature.type === "edge") {
+      edges.push(...(feature.items || [feature.item]));
+    } else if (feature && feature.type === "station") {
+      stations.push(...(feature.items || [feature.item]));
+      for (const station of stations) {
+        for (const edgeId of station.graph_edges || []) {
+          const edge = edgeById.get(edgeId);
+          if (edge) edges.push(edge);
+        }
+      }
+    }
+    const uniqueEdges = [...new Map(edges.map(edge => [edge.id, edge])).values()];
+    const lineIds = [];
+    const seenLineIds = new Set();
+    for (const edge of uniqueEdges) {
+      if (!seenLineIds.has(edge.line)) {
+        seenLineIds.add(edge.line);
+        lineIds.push(edge.line);
+      }
+    }
+    for (const station of stations) {
+      if (!seenLineIds.has(station.line)) {
+        seenLineIds.add(station.line);
+        lineIds.push(station.line);
+      }
+    }
+    return { edges: uniqueEdges, stations, lineIds };
   }
 
   function drawJunctions(css) {
+    const nodeScale = routeNodeScale();
     ctx.strokeStyle = css.getPropertyValue("--junction");
     ctx.fillStyle = css.getPropertyValue("--background");
-    ctx.lineWidth = 1.7;
+    ctx.lineWidth = routeMode
+      ? Math.max(0.15, Math.min(1.7, 0.45 * nodeScale))
+      : 1.7;
     for (const junction of data.junctions) {
       const [x, y] = screen(junction.world);
-      if (x < -6 || x > width + 6 || y < -6 || y > height + 6) continue;
+      if (x < -9 || x > width + 9 || y < -9 || y > height + 9) continue;
       const active = isActive("junction", junction.node);
+      const radius = routeMode
+        ? Math.min(active ? 5 : 3.4, (active ? 1.4 : 1) * nodeScale)
+        : active ? 5 : 3.4;
       ctx.beginPath();
-      ctx.arc(x, y, active ? 5 : 3.4, 0, tau);
+      ctx.arc(x, y, radius, 0, tau);
       ctx.fill();
       ctx.stroke();
     }
@@ -948,17 +1090,22 @@ canvas.dragging { cursor: grabbing; }
     const stationColor = css.getPropertyValue("--station");
     const selectedColor = css.getPropertyValue("--selected");
     const activeGroup = activeStationGroup();
+    const nodeScale = routeNodeScale();
     for (const station of data.stations) {
       const [x, y] = screen(station.world);
-      if (x < -6 || x > width + 6 || y < -6 || y > height + 6) continue;
-      const active = activeGroup !== null && station.group === activeGroup;
+      if (x < -9 || x > width + 9 || y < -9 || y > height + 9) continue;
+      const active = routeMode
+        ? isActive("station", station.station)
+        : activeGroup !== null && station.group === activeGroup;
       ctx.beginPath();
-      ctx.arc(x, y, 3.1, 0, tau);
+      ctx.arc(x, y, (routeMode ? Math.min(3.1, 0.8 * nodeScale) : 3.1), 0, tau);
       ctx.fillStyle = active ? selectedColor : stationColor;
       ctx.fill();
       if (station.topology === "junction") {
         ctx.strokeStyle = css.getPropertyValue("--junction");
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = routeMode
+          ? Math.max(0.15, Math.min(1.5, 0.35 * nodeScale))
+          : 1.5;
         ctx.stroke();
       }
     }
@@ -1048,7 +1195,7 @@ canvas.dragging { cursor: grabbing; }
 
   function featureContains(feature, type, id) {
     if (!feature || feature.type !== type) return false;
-    if (type === "edge" && feature.ids) return feature.ids.includes(id);
+    if (feature.ids) return feature.ids.includes(id);
     return feature.id === id;
   }
 
@@ -1057,9 +1204,21 @@ canvas.dragging { cursor: grabbing; }
   }
 
   function activeStationGroup() {
+    if (routeMode) return null;
     if (hovered && hovered.type === "station") return hovered.item.group;
     if (selected && selected.type === "station") return selected.item.group;
     return null;
+  }
+
+  function routeNodeScale() {
+    if (!routeMode) return 1;
+    const zoom = view.scale / fitScale;
+    return Math.max(0.015, Math.min(8, Math.pow(zoom / 8, 2)));
+  }
+
+  function nodeHitRadius() {
+    if (!routeMode) return edgeHitRadius;
+    return Math.max(1, Math.min(7, 1.8 * routeNodeScale()));
   }
 
   function formatDistance(metres) {
@@ -1079,14 +1238,31 @@ canvas.dragging { cursor: grabbing; }
 
   function nearestFeature(x, y) {
     let best = null;
-    let bestDistance = edgeHitRadius;
+    const hitRadius = nodeHitRadius();
+    let bestDistance = hitRadius;
+    const stationCandidates = [];
     for (const station of data.stations) {
       const point = screen(station.world);
       const distance = Math.hypot(point[0] - x, point[1] - y);
+      if (distance < hitRadius) stationCandidates.push({ station, distance });
       if (distance < bestDistance) {
         bestDistance = distance;
         best = { type: "station", id: station.station, item: station };
       }
+    }
+    if (routeMode && stationCandidates.length) {
+      stationCandidates.sort((a, b) => a.distance - b.distance || a.station.station - b.station.station);
+      const nearestDistance = stationCandidates[0].distance;
+      const stations = stationCandidates
+        .filter(candidate => candidate.distance <= nearestDistance + coincidentEdgeTolerance)
+        .map(candidate => candidate.station);
+      return {
+        type: "station",
+        id: stations[0].station,
+        ids: stations.map(station => station.station),
+        item: stations[0],
+        items: stations,
+      };
     }
     for (const junction of data.junctions) {
       const point = screen(junction.world);
@@ -1152,12 +1328,62 @@ canvas.dragging { cursor: grabbing; }
     return cosine >= parallelDirectionThreshold;
   }
 
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[character]);
+  }
+
+  function graphEdgeNumbers(edges) {
+    return edges.length ? edges.map(edge => `#${edge.id}`).join("、") : "なし";
+  }
+
+  function updateRouteDetail(feature) {
+    if (!feature || !["edge", "station"].includes(feature.type)) return false;
+    const match = routeMatch(feature);
+    const heading = feature.type === "edge"
+      ? `命中 graph_edge：${graphEdgeNumbers(match.edges)}`
+      : `駅：${[...new Set(match.stations.map(station => station.station_name))].map(escapeHtml).join("、")}`;
+    const edgeSummary = feature.type === "station"
+      ? `<div class="route-detail-summary">関連 graph_edge：${graphEdgeNumbers(match.edges)}</div>`
+      : "";
+    const entries = match.lineIds.map((lineId, index) => {
+      const line = lineById.get(lineId);
+      const hitEdges = match.edges.filter(edge => edge.line === lineId);
+      const allEdges = edgesByLine.get(lineId) || [];
+      const name = line ? line.name : "不明な路線";
+      const operator = line ? line.operator : "不明";
+      const railwayType = line ? line.railway_type_code : "不明";
+      const providerType = line ? line.provider_type_code : "不明";
+      return `<section class="route-entry route-color-${index % 6 + 1}">
+        <div class="route-entry-title"><i class="route-swatch"></i>rail_line #${lineId}</div>
+        <dl>
+          <dt>路線名</dt><dd>${escapeHtml(name)}</dd>
+          <dt>事業者</dt><dd>${escapeHtml(operator)}</dd>
+          <dt>鉄道区分コード</dt><dd>${escapeHtml(railwayType)}</dd>
+          <dt>事業者区分コード</dt><dd>${escapeHtml(providerType)}</dd>
+          <dt>命中 graph_edge</dt><dd>${graphEdgeNumbers(hitEdges)}</dd>
+          <dt>路線全体</dt><dd>${allEdges.length.toLocaleString("ja-JP")} graph_edge</dd>
+        </dl>
+      </section>`;
+    }).join("");
+    detail.classList.add("route-detail");
+    detail.innerHTML = `<div class="route-detail-heading">${heading}</div>${edgeSummary}
+      <div class="route-detail-summary">命中 rail_line：${match.lineIds.length}件</div>${entries}`;
+    return true;
+  }
+
   function updateDetail() {
     const feature = hovered || selected;
     if (!feature) {
-      detail.textContent = "ノードまたは接続にカーソルを合わせるか、クリックすると詳細を表示します。";
+      detail.classList.remove("route-detail");
+      detail.textContent = routeMode
+        ? "駅または接続にカーソルを合わせると、命中した路線全体を確認できます。"
+        : "ノードまたは接続にカーソルを合わせるか、クリックすると詳細を表示します。";
       return;
     }
+    if (routeMode && updateRouteDetail(feature)) return;
+    detail.classList.remove("route-detail");
     if (feature.type === "station") {
       const station = feature.item;
       const members = stationsByGroup.get(station.group) || [station];
@@ -1294,6 +1520,13 @@ canvas.dragging { cursor: grabbing; }
       updateDetail();
       requestDraw();
     }
+  });
+  routeModeToggle.addEventListener("change", () => {
+    routeMode = routeModeToggle.checked;
+    hovered = null;
+    selected = null;
+    updateDetail();
+    requestDraw();
   });
   resetButton.addEventListener("click", resetView);
   window.addEventListener("resize", resize);

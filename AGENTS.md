@@ -102,6 +102,10 @@ JGD2011 250 m population mesh (`T001142`) into `population_mesh.sqlite`.
 - Hovering coincident, locally parallel graph edges highlights all matching
   edges and lists every distinct displayed rail line. Treat this as geometric
   overlap, not proof that the physical track is shared.
+- Optional route mode resolves hovered graph edges and station anchors through
+  their stored `line_id`, shows the matching `graph_edge` and `rail_line`
+  details, and highlights every displayed graph edge of each matched line in a
+  distinct color. Do not infer route membership from names or coordinates.
 - The page UI is Japanese. Prefer macOS Japanese fonts (`Hiragino Sans`,
   `Hiragino Kaku Gothic ProN`) and show detail-card fields on separate lines.
 - Station details include `station.source_id`. Preserve trackpad/touch pinch

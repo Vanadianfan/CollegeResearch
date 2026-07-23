@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Raw View - N02",
+      "label": "N02 View",
       "type": "process",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
@@ -21,7 +21,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Raw View - ekidata",
+      "label": "Ekidata View",
       "type": "process",
       "command": "${workspaceFolder}/.venv/bin/python",
       "args": [
