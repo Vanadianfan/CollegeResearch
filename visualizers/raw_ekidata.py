@@ -3,18 +3,23 @@ from __future__ import annotations
 import argparse
 import math
 import re
+from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib import font_manager
 from matplotlib.collections import LineCollection
+from matplotlib.colors import ListedColormap
 
 from rail_data.paths import RAW_DATA_ROOT
 
 JAPANESE_FONT_PATH = Path("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc")
 JAPANESE_FONT = font_manager.FontProperties(fname=JAPANESE_FONT_PATH)
-FALLBACK_COLORS = plt.colormaps["tab20"].colors
+FALLBACK_COLORS = cast(
+    Sequence[object], cast(ListedColormap, plt.colormaps["tab20"]).colors
+)
 
 REQUIRED_COLUMNS = {
     "station": {
@@ -103,7 +108,7 @@ def load_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
     stations = stations.dropna(subset=["lon", "lat"])
     lines = lines.loc[lines["e_status"].eq(0)].copy()
 
-    active_line_codes = set(lines["line_cd"])
+    active_line_codes = lines["line_cd"].tolist()
     joins = joins.loc[joins["line_cd"].isin(active_line_codes)].copy()
 
     coordinates = stations.set_index("station_cd")[["lon", "lat"]]
@@ -126,7 +131,7 @@ def load_data(data_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
 
 def color_for_line(color_code: object, line_cd: int) -> object:
-    if pd.notna(color_code):
+    if isinstance(color_code, str):
         code = str(color_code).strip().lstrip("#")
         if re.fullmatch(r"[0-9a-fA-F]{6}", code):
             return f"#{code}"
@@ -170,13 +175,21 @@ def create_visualization(
     fig, ax = plt.subplots(figsize=(11, 10))
 
     line_colors = {
-        int(row.line_cd): color_for_line(row.line_color_c, int(row.line_cd))
-        for row in lines.itertuples()
+        int(line_cd): color_for_line(color_code, int(line_cd))
+        for line_cd, color_code in lines[["line_cd", "line_color_c"]].itertuples(
+            index=False, name=None
+        )
     }
     segments = [
-        [(row.lon1, row.lat1), (row.lon2, row.lat2)] for row in joins.itertuples()
+        [(lon1, lat1), (lon2, lat2)]
+        for lon1, lat1, lon2, lat2 in joins[
+            ["lon1", "lat1", "lon2", "lat2"]
+        ].itertuples(index=False, name=None)
     ]
-    segment_colors = [line_colors[int(row.line_cd)] for row in joins.itertuples()]
+    segment_colors = [
+        line_colors[int(line_cd)]
+        for (line_cd,) in joins[["line_cd"]].itertuples(index=False, name=None)
+    ]
     ax.add_collection(
         LineCollection(
             segments,
@@ -225,7 +238,7 @@ def create_visualization(
         annotation.set_visible(True)
         event.canvas.draw_idle()
 
-    mean_latitude = float(station_records["lat"].mean())
+    mean_latitude = float(station_records["lat"].to_numpy(dtype=float).mean())
     ax.set_aspect(1 / math.cos(math.radians(mean_latitude)))
     ax.autoscale_view()
     ax.margins(0.02)

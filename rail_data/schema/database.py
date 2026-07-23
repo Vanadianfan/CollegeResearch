@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import fields
 from pathlib import Path
-from typing import Iterator, Mapping, TypeVar
+from typing import TypeVar, cast
 
 from .records import (
     DatabaseRecord,
@@ -102,7 +103,10 @@ def row_to_record(
         raise SchemaMismatchError(
             f"row does not provide every column for {record_type.__name__}"
         ) from error
-    return record_type(**values)
+    # The concrete dataclass and its keyword names are both selected at runtime.
+    # Express that dynamic constructor boundary without weakening RecordT for callers.
+    constructor = cast(Callable[..., RecordT], record_type)
+    return constructor(**values)
 
 
 def iter_table_records(
@@ -121,4 +125,3 @@ def iter_table_records(
     query = f'SELECT {quoted_columns} FROM "{table_name}"'
     for row in connection.execute(query):
         yield row_to_record(record_type, row)
-

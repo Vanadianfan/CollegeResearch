@@ -396,11 +396,11 @@ def build_database_model(
         component_no = 0
         while unseen:
             start = min(unseen)
-            queue = deque([start])
+            node_queue = deque([start])
             component_nodes: set[int] = set()
             component_segments: set[int] = set()
-            while queue:
-                node_id = queue.popleft()
+            while node_queue:
+                node_id = node_queue.popleft()
                 if node_id in component_nodes:
                     continue
                 component_nodes.add(node_id)
@@ -414,7 +414,7 @@ def build_database_model(
                         else segment.from_node_id
                     )
                     if other not in component_nodes:
-                        queue.append(other)
+                        node_queue.append(other)
             component_id = len(line_components) + 1
             line_components.append(
                 LineComponentRow(
@@ -474,8 +474,10 @@ def build_database_model(
                 path_refs: list[tuple[int, int]] = []
                 current_node = start_node
                 current_segment_id = first_segment_id
+                end_node = start_node
                 while True:
                     if current_segment_id in visited_segments:
+                        end_node = current_node
                         break
                     visited_segments.add(current_segment_id)
                     segment = segment_by_id[current_segment_id]

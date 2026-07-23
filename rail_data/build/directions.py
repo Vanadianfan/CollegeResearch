@@ -159,7 +159,10 @@ def assign_left_running_parallel_directions(
             for edge in incident_edges[node_b_id]
             if edge.id not in parallel_edge_ids
         ]
-        edge_ids = tuple(sorted(parallel_edge_ids))
+        sorted_edge_ids = sorted(parallel_edge_ids)
+        if len(sorted_edge_ids) != 2:
+            continue
+        edge_ids = (sorted_edge_ids[0], sorted_edge_ids[1])
         if len(external_a) != 1 or len(external_b) != 1:
             skipped.append(
                 ParallelDirectionSkip(
@@ -259,4 +262,3 @@ def assign_left_running_parallel_directions(
         )
 
     return assignments, skipped
-

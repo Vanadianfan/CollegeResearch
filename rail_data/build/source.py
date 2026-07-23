@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Iterator
+from typing import IO, Iterator
 
 from rail_data.paths import N02_GML_ROOT, N02_XML_PATH, N02_ZIP_PATH
 
@@ -76,7 +76,7 @@ def locate_input(explicit_path: Path | None) -> Path:
 
 
 @contextmanager
-def open_n02_xml(path: Path) -> Iterator[BinaryIO]:
+def open_n02_xml(path: Path) -> Iterator[IO[bytes]]:
     if path.is_dir():
         xml_paths = sorted(path.glob("UTF-8/N02-*.xml")) or sorted(
             path.rglob("N02-*.xml")

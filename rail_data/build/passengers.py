@@ -12,7 +12,7 @@ import zipfile
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Iterator
+from typing import IO, Iterator
 
 from rail_data.paths import S12_GML_ROOT, S12_XML_PATH, S12_ZIP_PATH
 
@@ -66,7 +66,7 @@ def locate_s12_input(explicit_path: Path | None) -> Path:
 
 
 @contextmanager
-def open_s12_xml(path: Path) -> Iterator[BinaryIO]:
+def open_s12_xml(path: Path) -> Iterator[IO[bytes]]:
     if path.is_dir():
         xml_paths = sorted(path.glob("UTF-8/S12-*.xml")) or sorted(
             path.rglob("S12-*.xml")

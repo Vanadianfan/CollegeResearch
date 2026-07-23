@@ -5,7 +5,8 @@
   "python.analysis.extraPaths": [
     "${workspaceFolder}"
   ],
-  "python.analysis.diagnosticMode": "workspace",
+  "python.analysis.indexing": true,
+  "python.analysis.diagnosticMode": "openFilesOnly",
   "python.analysis.typeCheckingMode": "basic",
   "ruff.nativeServer": "on",
   "ruff.importStrategy": "useBundled",
