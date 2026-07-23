@@ -13,6 +13,8 @@ Downloaded source datasets live under `raw_data/`. Generated
 defined in `rail_data/paths.py`.
 Initialize a fresh checkout with `python3 setup.py`; it creates `.venv`,
 installs `requirements.txt`, and downloads the public raw datasets.
+The separate `population_data` package downloads and converts the 2020 census
+JGD2011 250 m population mesh (`T001142`) into `population_mesh.sqlite`.
 
 ## Data semantics that must be preserved
 
@@ -36,6 +38,9 @@ installs `requirements.txt`, and downloads the public raw datasets.
   `railroad_section`/provenance tables unless explicitly requested.
 - Distances use GRS80 geodesic metres. A station connection must satisfy
   `distance_m = from_station_offset_m + gap_length_m + to_station_offset_m`.
+- Population analysis uses `T001142001` (population total, including unknown
+  age) from the 2020 JGD2011 fifth mesh. Keep official ZIPs unchanged under
+  `raw_data/e-stat_population_2020_250m/`; do not sum sex or age subtotals.
 
 ## Current network rules
 
@@ -71,6 +76,18 @@ installs `requirements.txt`, and downloads the public raw datasets.
   .venv/bin/python -m rail_data.build.main --output /private/tmp/rail-network-test.sqlite
   .venv/bin/python -m visualizers.network_db /private/tmp/rail-network-test.sqlite --check-only
   ```
+
+- Population workflow:
+
+  ```bash
+  .venv/bin/python scripts/download_population_data.py
+  .venv/bin/python -m population_data.build
+  .venv/bin/python -m visualizers.population_mesh --strict --check-only
+  ```
+
+  `population_data.build` atomically replaces `population_mesh.sqlite` only
+  after independently comparing every mesh code, row count, population sum,
+  and reconstructed mesh boundary against the downloaded ZIPs.
 
 - Preserve unrelated user files and changes. Treat the four known unmatched
   stations (敦賀, 放出, 鴫野, and 箕面船場阪大前) as warnings unless their source

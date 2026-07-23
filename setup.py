@@ -38,8 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         action="append",
-        choices=("n02", "s12", "ekidata"),
-        help="取得するデータ。複数回指定可。省略時は n02 と s12。",
+        choices=("n02", "s12", "population", "ekidata"),
+        help="取得するデータ。複数回指定可。省略時は n02、s12、population。",
     )
     parser.add_argument(
         "--force-download",

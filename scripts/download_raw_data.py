@@ -1,34 +1,27 @@
 #!/usr/bin/env python3
-"""Download the project's external raw datasets into ``raw_data/``.
-
-N02 and S12 are public ZIP files.  Ekidata.jp requires a free member login;
-its download URLs are kept here as parameters, but a valid session cookie must
-be supplied explicitly.  No third-party Python packages are required.
-"""
+"""Orchestrate the project's independent raw-data downloaders."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import os
-import shutil
 import sys
 import tempfile
 import urllib.error
 import urllib.request
-import zipfile
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+from download_n02_data import download_n02_data
+from download_population_data import download_population_data
+from download_s12_data import download_s12_data
 
 
 # ---------------------------------------------------------------------------
-# Download parameters.  Update these values when a source publishes a new
-# edition.  SHA-256 is optional because the official files may be corrected in
-# place; set it when a fixed, reproducible snapshot is required.
+# Ekidata.jp parameters remain here because it is the only optional source
+# requiring a login cookie.  Public datasets have independent downloaders.
 # ---------------------------------------------------------------------------
-
-N02_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/N02/N02-24/N02-24_GML.zip"
-S12_URL = "https://nlftp.mlit.go.jp/ksj/gml/data/S12/S12-25/S12-25_GML.zip"
 
 EKIDATA_JOIN_URL = "https://ekidata.jp/dl/f.php?t=6&d=20260618"
 EKIDATA_LINE_URL = "https://ekidata.jp/dl/f.php?t=3&d=20260618"
@@ -40,54 +33,37 @@ USER_AGENT = "railway-research-raw-data-downloader/1.0"
 CHUNK_SIZE = 1024 * 1024
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Download:
     name: str
     url: str
     destination: Path
-    archive: bool = False
     sha256: str | None = None
     requires_login: bool = False
 
 
-DOWNLOADS: dict[str, tuple[Download, ...]] = {
-    "n02": (
-        Download(
-            name="国土数値情報 N02-24 鉄道データ",
-            url=N02_URL,
-            destination=RAW_DATA_DIR / "N02-24_GML",
-            archive=True,
-        ),
+EKIDATA_DOWNLOADS: tuple[Download, ...] = (
+    Download(
+        name="駅データ.jp 接続駅",
+        url=EKIDATA_JOIN_URL,
+        destination=RAW_DATA_DIR / "駅データ.jp" / "join20260618.csv",
+        requires_login=True,
     ),
-    "s12": (
-        Download(
-            name="国土数値情報 S12-25 駅別乗降客数",
-            url=S12_URL,
-            destination=RAW_DATA_DIR / "S12-25_GML",
-            archive=True,
-        ),
+    Download(
+        name="駅データ.jp 路線",
+        url=EKIDATA_LINE_URL,
+        destination=RAW_DATA_DIR / "駅データ.jp" / "line20260618free.csv",
+        requires_login=True,
     ),
-    "ekidata": (
-        Download(
-            name="駅データ.jp 接続駅",
-            url=EKIDATA_JOIN_URL,
-            destination=RAW_DATA_DIR / "駅データ.jp" / "join20260618.csv",
-            requires_login=True,
-        ),
-        Download(
-            name="駅データ.jp 路線",
-            url=EKIDATA_LINE_URL,
-            destination=RAW_DATA_DIR / "駅データ.jp" / "line20260618free.csv",
-            requires_login=True,
-        ),
-        Download(
-            name="駅データ.jp 駅",
-            url=EKIDATA_STATION_URL,
-            destination=RAW_DATA_DIR / "駅データ.jp" / "station20260713free.csv",
-            requires_login=True,
-        ),
+    Download(
+        name="駅データ.jp 駅",
+        url=EKIDATA_STATION_URL,
+        destination=RAW_DATA_DIR / "駅データ.jp" / "station20260713free.csv",
+        requires_login=True,
     ),
-}
+)
+
+DATASET_NAMES = ("n02", "s12", "population", "ekidata")
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,10 +73,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         action="append",
-        choices=tuple(DOWNLOADS),
+        choices=DATASET_NAMES,
         dest="datasets",
         help=(
-            "取得対象。複数回指定可。省略時は公開データの n02 と s12。"
+            "取得対象。複数回指定可。省略時は公開データの n02、s12、population。"
+            "population は2020年250m人口の全国ZIP、"
             "ekidata はログイン Cookie が必要です。"
         ),
     )
@@ -139,11 +116,17 @@ def format_bytes(byte_count: int) -> str:
 
 
 def print_downloads() -> None:
-    for dataset, downloads in DOWNLOADS.items():
-        print(f"[{dataset}]")
-        for item in downloads:
-            print(f"  {item.destination.relative_to(PROJECT_ROOT)}")
-            print(f"    {item.url}")
+    print("[n02]")
+    download_n02_data(force=False, list_only=True)
+    print("[s12]")
+    download_s12_data(force=False, list_only=True)
+    print("[population]")
+    print("  raw_data/e-stat_population_2020_250m/")
+    print("    e-Stat T001142（一次メッシュ一覧を実行時に自動取得）")
+    print("[ekidata]")
+    for item in EKIDATA_DOWNLOADS:
+        print(f"  {item.destination.relative_to(PROJECT_ROOT)}")
+        print(f"    {item.url}")
 
 
 def request_headers(item: Download, ekidata_cookie: str | None) -> dict[str, str]:
@@ -163,9 +146,8 @@ def request_headers(item: Download, ekidata_cookie: str | None) -> dict[str, str
 
 def download_to_temp(item: Download, ekidata_cookie: str | None) -> Path:
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = ".zip" if item.archive else item.destination.suffix
     file_handle, temp_name = tempfile.mkstemp(
-        prefix=".download-", suffix=suffix, dir=RAW_DATA_DIR
+        prefix=".download-", suffix=item.destination.suffix, dir=RAW_DATA_DIR
     )
     temp_path = Path(temp_name)
     digest = hashlib.sha256()
@@ -177,13 +159,6 @@ def download_to_temp(item: Download, ekidata_cookie: str | None) -> Path:
         with os.fdopen(file_handle, "wb") as output:
             with urllib.request.urlopen(request, timeout=60) as response:
                 content_type = response.headers.get_content_type()
-                if item.archive and content_type not in {
-                    "application/zip",
-                    "application/octet-stream",
-                }:
-                    raise RuntimeError(
-                        f"ZIP ではない応答です: Content-Type={content_type}"
-                    )
                 if item.requires_login and content_type in {
                     "text/html",
                     "application/xhtml+xml",
@@ -206,8 +181,6 @@ def download_to_temp(item: Download, ekidata_cookie: str | None) -> Path:
         print()
         if downloaded == 0:
             raise RuntimeError("空のファイルが返されました。")
-        if item.archive and not zipfile.is_zipfile(temp_path):
-            raise RuntimeError("応答内容は有効な ZIP ファイルではありません。")
         if item.sha256 and digest.hexdigest().lower() != item.sha256.lower():
             raise RuntimeError(
                 "SHA-256 が一致しません: "
@@ -217,50 +190,6 @@ def download_to_temp(item: Download, ekidata_cookie: str | None) -> Path:
     except Exception:
         temp_path.unlink(missing_ok=True)
         raise
-
-
-def validate_zip_member(member: zipfile.ZipInfo) -> None:
-    path = PurePosixPath(member.filename)
-    if path.is_absolute() or ".." in path.parts:
-        raise RuntimeError(f"安全でない ZIP 内パスです: {member.filename}")
-    if member.is_dir():
-        return
-    unix_mode = member.external_attr >> 16
-    if (unix_mode & 0o170000) == 0o120000:
-        raise RuntimeError(
-            f"ZIP 内のシンボリックリンクを拒否しました: {member.filename}"
-        )
-
-
-def extract_zip(temp_path: Path, destination: Path, force: bool) -> None:
-    with tempfile.TemporaryDirectory(prefix=".extract-", dir=RAW_DATA_DIR) as temp_dir:
-        extracted = Path(temp_dir)
-        with zipfile.ZipFile(temp_path) as archive:
-            for member in archive.infolist():
-                validate_zip_member(member)
-            archive.extractall(extracted)
-
-        children = list(extracted.iterdir())
-        has_named_wrapper = (
-            len(children) == 1
-            and children[0].is_dir()
-            and children[0].name == destination.name
-        )
-        source = children[0] if has_named_wrapper else extracted
-        if destination.exists():
-            if not force:
-                raise FileExistsError(destination)
-            if destination.is_dir():
-                shutil.rmtree(destination)
-            else:
-                destination.unlink()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source == extracted:
-            destination.mkdir()
-            for child in children:
-                shutil.move(str(child), destination / child.name)
-        else:
-            shutil.move(str(source), destination)
 
 
 def install_file(temp_path: Path, destination: Path, force: bool) -> None:
@@ -280,10 +209,7 @@ def fetch(item: Download, force: bool, ekidata_cookie: str | None) -> None:
     print(f"       {item.url}")
     temp_path = download_to_temp(item, ekidata_cookie)
     try:
-        if item.archive:
-            extract_zip(temp_path, item.destination, force)
-        else:
-            install_file(temp_path, item.destination, force)
+        install_file(temp_path, item.destination, force)
         print(f"[OK]   {relative}")
     finally:
         temp_path.unlink(missing_ok=True)
@@ -295,11 +221,23 @@ def main() -> int:
         print_downloads()
         return 0
 
-    datasets = args.datasets or ["n02", "s12"]
+    datasets = args.datasets or ["n02", "s12", "population"]
     try:
         for dataset in datasets:
-            for item in DOWNLOADS[dataset]:
-                fetch(item, args.force, args.ekidata_cookie)
+            if dataset == "n02":
+                download_n02_data(force=args.force)
+            elif dataset == "s12":
+                download_s12_data(force=args.force)
+            elif dataset == "population":
+                download_population_data(
+                    mesh_codes=None,
+                    output=RAW_DATA_DIR / "e-stat_population_2020_250m",
+                    force=args.force,
+                    workers=4,
+                )
+            else:
+                for item in EKIDATA_DOWNLOADS:
+                    fetch(item, args.force, args.ekidata_cookie)
     except (OSError, RuntimeError, urllib.error.URLError) as exc:
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1

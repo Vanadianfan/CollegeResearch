@@ -9,4 +9,9 @@ source .venv/bin/activate
 
 # 建立 SQLite 鐵路網
 python -m rail_data.build.main
+
+# 下載、整理並檢查2020年250m人口資料
+python scripts/download_population_data.py
+python -m population_data.build
+python -m visualizers.population_mesh --open
 ```

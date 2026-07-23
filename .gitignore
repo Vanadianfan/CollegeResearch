@@ -27,7 +27,7 @@ env/
 *.swp
 *.swo
 
-# Downloaded source datasets (recreated by scripts/download_raw_data.py)
+# Downloaded source datasets (recreated by the scripts/download_* tools)
 /raw_data/
 
 # Generated databases and SQLite sidecars
