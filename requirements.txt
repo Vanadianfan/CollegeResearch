@@ -1,0 +1,4 @@
+geopandas==1.1.4
+matplotlib==3.11.1
+pandas==3.0.3
+pyproj==3.7.2
