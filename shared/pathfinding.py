@@ -6,19 +6,17 @@ import heapq
 import sqlite3
 from typing import Any
 
+from .params import DEFAULT_PARAMS, NetworkParams
 from .transfer import (
-    CIRCUITY_FACTOR,
-    FIXED_TRANSFER_PENALTY_S,
-    MAX_TRANSFER_DISTANCE_M,
-    WALK_SPEED_MPS,
     calculate_transfer_cost,
     fast_distance_m,
     get_all_station_coordinates,
 )
 
-# 列車運行參數
-TRAIN_SPEED_MPS = 50.0 * 1000.0 / 3600.0  # 電車等速巡航 50 km/h ~= 13.889 m/s
-TRAIN_STOP_PENALTY_S = 30.0                # 每站停靠固定 10s + 減速/加速損失 20s
+# 列車運行參數（維持模組層級常數以確保舊代碼完全相容）
+TRAIN_SPEED_MPS = DEFAULT_PARAMS.train_speed_mps
+SHINKANSEN_SPEED_MPS = DEFAULT_PARAMS.shinkansen_speed_mps
+TRAIN_STOP_PENALTY_S = DEFAULT_PARAMS.train_stop_penalty_s
 
 
 class RailwayGraph:
@@ -27,10 +25,11 @@ class RailwayGraph:
     節點: station_id
     邊:
       1. 既有軌道邊: 代表兩相鄰站間列車運行，邊標識為 station_connection.id (整數邊號)
-      2. 擴展轉乘邊: 代表 600m 內車站轉乘，邊標識為 '車站id1-車站id2'
+      2. 擴展轉乘邊: 代表上限距離內車站轉乘，邊標識為 '車站id1-車站id2'
     """
 
-    def __init__(self, connection: sqlite3.Connection):
+    def __init__(self, connection: sqlite3.Connection, params: NetworkParams = DEFAULT_PARAMS):
+        self.params = params
         self.adj: dict[int, list[tuple[int, float, Any, str]]] = {}
         # u -> list of (v, time_cost_s, edge_repr, edge_kind)
         # edge_kind: 'rail' | 'transfer'
@@ -52,26 +51,34 @@ class RailwayGraph:
         for a_id, s_id in cur.fetchall():
             anchor_to_station[a_id] = s_id
 
-        # 1. 載入軌道邊 (station_connection)
+        # 1. 載入軌道邊 (station_connection)，依 rail_line.provider_type_code 識別新幹線 ('1') 與在來線速度
         cur.execute("""
-            SELECT id, from_anchor_id, to_anchor_id, distance_m
-            FROM station_connection
-            WHERE direction = 'forward'
+            SELECT sc.id, sc.from_anchor_id, sc.to_anchor_id, sc.distance_m, rl.provider_type_code
+            FROM station_connection AS sc
+            JOIN rail_line_component AS rlc ON rlc.id = sc.line_component_id
+            JOIN rail_line AS rl ON rl.id = rlc.line_id
+            WHERE sc.direction = 'forward'
         """)
-        for conn_id, from_a, to_a, dist_m in cur.fetchall():
+        for conn_id, from_a, to_a, dist_m, provider_type_code in cur.fetchall():
             s_from = anchor_to_station.get(from_a)
             s_to = anchor_to_station.get(to_a)
             if s_from is not None and s_to is not None and s_from != s_to:
-                # 列車時間成本 = 距離 / 速度 + 停站加減速懲罰 (30s)
-                time_cost_s = (dist_m / TRAIN_SPEED_MPS) + TRAIN_STOP_PENALTY_S
+                speed_mps = (
+                    self.params.shinkansen_speed_mps
+                    if provider_type_code == "1"
+                    else self.params.train_speed_mps
+                )
+                # 列車時間成本 = 距離 / 速度 + 停站加減速懲罰
+                time_cost_s = (dist_m / speed_mps) + self.params.train_stop_penalty_s
                 # 既有整合邊用邊號 (conn_id)
                 self._add_edge(s_from, s_to, time_cost_s, conn_id, "rail")
 
-        # 2. 載入並構建 600m 擴展轉乘邊
+        # 2. 載入並構建擴展轉乘邊
         station_coords = get_all_station_coordinates(connection)
         stations_list = list(station_coords.items())
         n = len(stations_list)
-        delta_deg = (MAX_TRANSFER_DISTANCE_M / 111000.0) * 1.5
+        dist_limit = self.params.max_transfer_distance_m
+        delta_deg = (dist_limit / 111000.0) * 1.5
 
         for i in range(n):
             s1, (lon1, lat1, _, _) = stations_list[i]
@@ -81,8 +88,8 @@ class RailwayGraph:
                     continue
 
                 dist_m = fast_distance_m(lon1, lat1, lon2, lat2)
-                if dist_m <= MAX_TRANSFER_DISTANCE_M:
-                    _, total_transfer_cost_s = calculate_transfer_cost(dist_m)
+                if dist_m <= dist_limit:
+                    _, total_transfer_cost_s = calculate_transfer_cost(dist_m, params=self.params)
                     # 轉乘邊用「車站id1-車站id2」
                     self._add_edge(s1, s2, total_transfer_cost_s, f"{s1}-{s2}", "transfer")
                     self._add_edge(s2, s1, total_transfer_cost_s, f"{s2}-{s1}", "transfer")

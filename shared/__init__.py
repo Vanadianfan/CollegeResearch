@@ -10,6 +10,7 @@ from .transfer import (
     get_transferable_stations,
 )
 from .pathfinding import (
+    SHINKANSEN_SPEED_MPS,
     TRAIN_SPEED_MPS,
     TRAIN_STOP_PENALTY_S,
     RailwayGraph,
@@ -22,6 +23,7 @@ __all__ = [
     "MAX_TRANSFER_DISTANCE_M",
     "WALK_SPEED_MPS",
     "TRAIN_SPEED_MPS",
+    "SHINKANSEN_SPEED_MPS",
     "TRAIN_STOP_PENALTY_S",
     "fast_distance_m",
     "get_transferable_station_ids",

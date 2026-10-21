@@ -48,7 +48,7 @@ class StationRecord:
     geometry_length_m: float
     geometry_status: str
     betweenness_centrality: float = 0.0
-    closeness_centrality: float = 0.0
+    harmonic_centrality: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

@@ -591,7 +591,7 @@ def load_visual_data(
             "line_name": row[12],
             "topology": row[13],
             "betweenness": round(row[14], 6),
-            "closeness": round(row[15], 6),
+            "harmonic": round(row[15], 6),
         }
         for row in connection.execute(
             """
@@ -612,7 +612,7 @@ def load_visual_data(
                 g.id, g.group_code, g.display_name, g.passengers,
                 s.line_id, l.name, n.topology_type,
                 COALESCE(s.betweenness_centrality, 0.0),
-                COALESCE(s.closeness_centrality, 0.0)
+                COALESCE(s.harmonic_centrality, 0.0)
             FROM ranked_anchor AS ra
             JOIN station AS s ON s.id = ra.station_id
             JOIN station_group AS g ON g.id = s.group_id
@@ -654,17 +654,23 @@ def load_visual_data(
             "from": row[1],
             "to": row[2],
             "distance": round(row[3], 2),
-            "time_cost": round((row[3] / (50000.0 / 3600.0)) + 30.0, 1),
+            "time_cost": round(
+                (row[3] / ((200000.0 if row[5] == "1" else 50000.0) / 3600.0)) + 30.0,
+                1,
+            ),
+            "shinkansen": row[5] == "1",
             "graph_edges": [int(x) for x in (row[4] or "").split(",") if x],
         }
         for row in connection.execute("""
             SELECT
                 c.id, s_from.id, s_to.id, c.distance_m,
-                GROUP_CONCAT(h.graph_edge_id)
+                GROUP_CONCAT(h.graph_edge_id),
+                l_from.provider_type_code
             FROM station_connection AS c
             JOIN station_anchor AS a_from ON a_from.id = c.from_anchor_id
             JOIN station_component AS sc_from ON sc_from.id = a_from.station_component_id
             JOIN station AS s_from ON s_from.id = sc_from.station_id
+            JOIN rail_line AS l_from ON l_from.id = s_from.line_id
             JOIN station_anchor AS a_to ON a_to.id = c.to_anchor_id
             JOIN station_component AS sc_to ON sc_to.id = a_to.station_component_id
             JOIN station AS s_to ON s_to.id = sc_to.station_id
@@ -1458,7 +1464,7 @@ canvas.dragging { cursor: grabbing; }
         `同グループの表示駅：${members.length}件`,
         `路線：${routes}`,
         `媒介中心性（Betweenness）：${station.betweenness !== undefined && station.betweenness !== null ? Number(station.betweenness).toExponential(4) : "0.0000e+0"}`,
-        `近接中心性（Closeness）：${station.closeness !== undefined && station.closeness !== null ? Number(station.closeness).toExponential(4) : "0.0000e+0"}`,
+        `調和中心性（Harmonic）：${station.harmonic !== undefined && station.harmonic !== null ? Number(station.harmonic).toExponential(4) : "0.0000e+0"}`,
         `対象駅：${station.line_name}・${station.station_name}${suffix}`,
         `出典ID：${station.source_id}`,
       ].join("\n");
@@ -1676,6 +1682,7 @@ canvas.dragging { cursor: grabbing; }
           dist.set(c.to, alt);
           parent.set(c.to, {
             prev: u, type: 'rail', repr: c.id, conn: c,
+            shinkansen: Boolean(c.shinkansen),
             time: c.time_cost, distance: c.distance,
             fromStation: stationMap.get(u), toStation: stationMap.get(c.to),
             graphEdges: c.graph_edges || []
@@ -1744,7 +1751,7 @@ canvas.dragging { cursor: grabbing; }
       lockedCard.innerHTML = `
         <div style="font-weight:700; font-size:15px; color:#10b981; margin-bottom:4px;">乗換可能駅（600m以内）</div>
         <div>基準駅：<strong>${lockedStation1.station_name}</strong>（${lockedStation1.line_name}）<span class="muted">[ID: ${lockedStation1.station}]</span></div>
-        <div class="muted" style="font-size:12px; margin-top:2px;">媒介中心性: ${(Number(lockedStation1.betweenness) || 0).toExponential(4)} ｜ 近接中心性: ${(Number(lockedStation1.closeness) || 0).toExponential(4)}</div>
+        <div class="muted" style="font-size:12px; margin-top:2px;">媒介中心性: ${(Number(lockedStation1.betweenness) || 0).toExponential(4)} ｜ 調和中心性: ${(Number(lockedStation1.harmonic) || 0).toExponential(4)}</div>
         <hr style="margin:8px 0; border:none; border-top:1px solid var(--border);">
         <div style="font-weight:600; margin-bottom:4px;">乗換可能駅：${lockedTransferList.length} 件</div>
         <ul style="max-height:220px; overflow-y:auto; padding-left:20px; margin:0 0 8px 0;">
@@ -1784,7 +1791,7 @@ canvas.dragging { cursor: grabbing; }
           <div style="max-height:220px; overflow-y:auto; font-size:12.5px; padding-right:4px;">
             ${lockedShortestPath.steps.map((s, idx) => `
               <div style="margin-bottom:6px; padding:4px 6px; background:rgba(0,0,0,0.03); border-radius:4px; border-left:3px solid ${s.type === 'rail' ? '#0284c7' : '#10b981'};">
-                <div><strong>#${idx+1}</strong> ${s.type === 'rail' ? `<span style="color:#0284c7; font-weight:600;">[路線接続] 接続ID #${s.repr}</span>` : `<span style="color:#10b981; font-weight:600;">[乗換リンク] ${s.repr}</span>`}</div>
+                <div><strong>#${idx+1}</strong> ${s.type === 'rail' ? `<span style="color:#0284c7; font-weight:600;">[路線接続] 接続ID #${s.repr}${s.shinkansen ? '（新幹線）' : ''}</span>` : `<span style="color:#10b981; font-weight:600;">[乗換リンク] ${s.repr}</span>`}</div>
                 <div style="font-size:12px;">${s.fromStation.station_name} → ${s.toStation.station_name} ｜ ${s.type === 'rail' ? `距離: ${Math.round(s.distance)}m ｜ 走行・停車: ${Math.round(s.time)}秒` : `徒歩: ${Math.round(s.distance)}m ｜ 乗換所要: ${Math.round(s.time)}秒`}</div>
               </div>
             `).join('')}

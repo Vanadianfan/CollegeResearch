@@ -6,11 +6,13 @@ import math
 import sqlite3
 from typing import Any
 
-# 參數設定
-WALK_SPEED_MPS = 80.0 / 60.0       # 80 m/min ~= 1.333 m/s
-CIRCUITY_FACTOR = 1.2              # 站內/街區繞行係數
-FIXED_TRANSFER_PENALTY_S = 180.0   # 固定轉乘懲罰 (3分鐘: 剪票口、上下階梯、平均候車)
-MAX_TRANSFER_DISTANCE_M = 600.0    # 歐氏距離轉乘上限 600m
+from .params import DEFAULT_PARAMS, NetworkParams
+
+# 參數設定（維持模組層級常數以確保舊代碼完全相容）
+WALK_SPEED_MPS = DEFAULT_PARAMS.walk_speed_mps
+CIRCUITY_FACTOR = DEFAULT_PARAMS.circuity_factor
+FIXED_TRANSFER_PENALTY_S = DEFAULT_PARAMS.fixed_transfer_penalty_s
+MAX_TRANSFER_DISTANCE_M = DEFAULT_PARAMS.max_transfer_distance_m
 
 
 def fast_distance_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -24,17 +26,21 @@ def fast_distance_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float
     return math.hypot(dx, dy)
 
 
-def calculate_transfer_cost(distance_m: float) -> tuple[float, float]:
+def calculate_transfer_cost(
+    distance_m: float,
+    params: NetworkParams | None = None,
+) -> tuple[float, float]:
     """
     計算轉乘時間成本。
-    若兩線路交會於完全同一個點 (distance_m ~ 0)，純步行時間為 0，其餘固定轉乘成本 (180s) 照常計入。
+    若兩線路交會於完全同一個點 (distance_m ~ 0)，純步行時間為 0，其餘固定轉乘成本照常計入。
     回傳: (walk_time_s, total_transfer_cost_s)
     """
+    p = params or DEFAULT_PARAMS
     if distance_m < 1e-4:
         walk_time_s = 0.0
     else:
-        walk_time_s = (distance_m * CIRCUITY_FACTOR) / WALK_SPEED_MPS
-    total_cost_s = walk_time_s + FIXED_TRANSFER_PENALTY_S
+        walk_time_s = (distance_m * p.circuity_factor) / p.walk_speed_mps
+    total_cost_s = walk_time_s + p.fixed_transfer_penalty_s
     return walk_time_s, total_cost_s
 
 
@@ -72,12 +78,16 @@ def get_all_station_coordinates(connection: sqlite3.Connection) -> dict[int, tup
 def get_transferable_stations(
     connection: sqlite3.Connection,
     station_id: int,
-    max_distance_m: float = MAX_TRANSFER_DISTANCE_M,
+    max_distance_m: float | None = None,
     station_coords: dict[int, tuple[float, float, str, str]] | None = None,
+    params: NetworkParams | None = None,
 ) -> list[dict[str, Any]]:
     """
-    給出一個車站 id，輸出所有距離在 600m 以內的可轉乘車站列表與詳細資訊。
+    給出一個車站 id，輸出所有距離在上限以內的可轉乘車站列表與詳細資訊。
     """
+    p = params or DEFAULT_PARAMS
+    dist_limit = max_distance_m if max_distance_m is not None else p.max_transfer_distance_m
+
     if station_coords is None:
         station_coords = get_all_station_coordinates(connection)
 
@@ -88,7 +98,7 @@ def get_transferable_stations(
     results: list[dict[str, Any]] = []
 
     # 粗篩經緯度範圍 (0.008度約 700~900m)
-    delta_deg = (max_distance_m / 111000.0) * 1.5
+    delta_deg = (dist_limit / 111000.0) * 1.5
 
     for other_id, (o_lon, o_lat, o_name, o_line) in station_coords.items():
         if other_id == station_id:
@@ -97,8 +107,8 @@ def get_transferable_stations(
             continue
 
         dist_m = fast_distance_m(base_lon, base_lat, o_lon, o_lat)
-        if dist_m <= max_distance_m:
-            walk_s, total_s = calculate_transfer_cost(dist_m)
+        if dist_m <= dist_limit:
+            walk_s, total_s = calculate_transfer_cost(dist_m, params=p)
             results.append({
                 "station_id": other_id,
                 "station_name": o_name,
@@ -116,8 +126,9 @@ def get_transferable_stations(
 def get_transferable_station_ids(
     connection: sqlite3.Connection,
     station_id: int,
-    max_distance_m: float = MAX_TRANSFER_DISTANCE_M,
+    max_distance_m: float | None = None,
     station_coords: dict[int, tuple[float, float, str, str]] | None = None,
+    params: NetworkParams | None = None,
 ) -> list[int]:
     """
     給出一個車站 id，僅輸出符合定義的可轉乘車站 id 清單。
@@ -127,5 +138,6 @@ def get_transferable_station_ids(
         station_id,
         max_distance_m=max_distance_m,
         station_coords=station_coords,
+        params=params,
     )
     return [item["station_id"] for item in stations]
