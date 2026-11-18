@@ -44,6 +44,35 @@ def calculate_transfer_cost(
     return walk_time_s, total_cost_s
 
 
+def get_all_operational_stop_coordinates(
+    connection: sqlite3.Connection,
+    region: str | None = None,
+) -> dict[int, tuple[float, float, str, str]]:
+    """
+    載入運營網路所有停靠站 (operational_line_stop) 對應之 N02 物理座標。
+    回傳: stop_id -> (lon, lat, stop_name, operational_line_name)
+    """
+    where_clause = ""
+    params: tuple[object, ...] = ()
+    if region and region in ("tokyo", "kinki"):
+        where_clause = "WHERE ols.region = ?"
+        params = (region,)
+
+    query = f"""
+        SELECT
+            ols.id, n.lon, n.lat, ols.stop_name, ol.name
+        FROM operational_line_stop AS ols
+        JOIN operational_line AS ol ON ol.id = ols.operational_line_id
+        JOIN station_anchor AS a ON a.id = ols.station_anchor_id
+        JOIN network_node AS n ON n.id = a.node_id
+        {where_clause}
+    """
+    coords: dict[int, tuple[float, float, str, str]] = {}
+    for row in connection.execute(query, params):
+        coords[row[0]] = (row[1], row[2], row[3], row[4])
+    return coords
+
+
 def get_all_station_coordinates(connection: sqlite3.Connection) -> dict[int, tuple[float, float, str, str]]:
     """
     載入所有車站之代表坐標 (primary anchor)。

@@ -64,7 +64,8 @@ def create_schema(connection: sqlite3.Connection) -> None:
             line_id INTEGER NOT NULL REFERENCES rail_line(id),
             name TEXT NOT NULL,
             geometry_length_m REAL NOT NULL,
-            geometry_status TEXT NOT NULL
+            geometry_status TEXT NOT NULL,
+            region TEXT CHECK(region IN ('tokyo', 'kinki'))
         );
 
         CREATE TABLE station_component (
@@ -82,7 +83,6 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE network_node (
             id INTEGER PRIMARY KEY,
             line_id INTEGER NOT NULL REFERENCES rail_line(id),
-            line_component_id INTEGER REFERENCES rail_line_component(id),
             lon REAL NOT NULL,
             lat REAL NOT NULL,
             topology_type TEXT NOT NULL,
@@ -92,7 +92,6 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE TABLE atomic_segment (
             id INTEGER PRIMARY KEY,
             line_id INTEGER NOT NULL REFERENCES rail_line(id),
-            line_component_id INTEGER REFERENCES rail_line_component(id),
             from_node_id INTEGER NOT NULL REFERENCES network_node(id),
             to_node_id INTEGER NOT NULL REFERENCES network_node(id),
             length_m REAL NOT NULL CHECK(length_m > 0),
@@ -159,11 +158,59 @@ def create_schema(connection: sqlite3.Connection) -> None:
             UNIQUE(station_connection_id, sequence_no)
         );
 
+        CREATE TABLE operational_line (
+            id INTEGER PRIMARY KEY,
+            line_code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            operator_name TEXT NOT NULL,
+            line_color TEXT,
+            service_kind TEXT NOT NULL,
+            is_loop INTEGER NOT NULL CHECK(is_loop IN (0, 1)),
+            station_count INTEGER NOT NULL CHECK(station_count >= 0),
+            total_distance_m REAL NOT NULL CHECK(total_distance_m >= 0)
+        );
+
+        CREATE TABLE operational_line_stop (
+            id INTEGER PRIMARY KEY,
+            operational_line_id INTEGER NOT NULL REFERENCES operational_line(id),
+            stop_sequence INTEGER NOT NULL,
+            station_anchor_id INTEGER NOT NULL REFERENCES station_anchor(id),
+            stop_name TEXT NOT NULL,
+            pref_code TEXT NOT NULL,
+            region TEXT CHECK(region IN ('tokyo', 'kinki')),
+            cumulative_distance_m REAL NOT NULL CHECK(cumulative_distance_m >= 0),
+            betweenness_centrality REAL DEFAULT 0.0,
+            harmonic_centrality REAL DEFAULT 0.0,
+            regional_betweenness_centrality REAL,
+            regional_harmonic_centrality REAL,
+            UNIQUE(operational_line_id, stop_sequence)
+        );
+
+        CREATE TABLE operational_edge (
+            id INTEGER PRIMARY KEY,
+            operational_line_id INTEGER NOT NULL REFERENCES operational_line(id),
+            sequence_no INTEGER NOT NULL,
+            from_stop_id INTEGER NOT NULL REFERENCES operational_line_stop(id),
+            to_stop_id INTEGER NOT NULL REFERENCES operational_line_stop(id),
+            direction TEXT NOT NULL CHECK(direction = 'forward'),
+            distance_m REAL NOT NULL CHECK(distance_m >= 0),
+            cost_s REAL NOT NULL CHECK(cost_s >= 0),
+            skipped_station_count INTEGER NOT NULL CHECK(skipped_station_count >= 0),
+            CHECK(from_stop_id <> to_stop_id)
+        );
+
+        CREATE TABLE operational_edge_has_graph_edge (
+            id INTEGER PRIMARY KEY,
+            operational_edge_id INTEGER NOT NULL REFERENCES operational_edge(id),
+            sequence_no INTEGER NOT NULL,
+            graph_edge_id INTEGER NOT NULL REFERENCES graph_edge(id),
+            forward INTEGER NOT NULL CHECK(forward IN (0, 1)),
+            UNIQUE(operational_edge_id, sequence_no)
+        );
+
         CREATE INDEX idx_station_group ON station(group_id);
         CREATE INDEX idx_station_line ON station(line_id);
-        CREATE INDEX idx_node_line_component ON network_node(line_component_id);
         CREATE INDEX idx_node_topology_type ON network_node(topology_type);
-        CREATE INDEX idx_segment_line_component ON atomic_segment(line_component_id);
         CREATE INDEX idx_anchor_node ON station_anchor(node_id);
         CREATE INDEX idx_graph_edge_component ON graph_edge(line_component_id);
         CREATE INDEX idx_graph_edge_has_atomic_segment_atomic
@@ -171,11 +218,30 @@ def create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX idx_connection_component ON station_connection(line_component_id);
         CREATE INDEX idx_station_connection_has_graph_edge_graph
             ON station_connection_has_graph_edge(graph_edge_id);
+        CREATE INDEX idx_station_region ON station(region);
+        CREATE INDEX idx_operational_stop_line ON operational_line_stop(operational_line_id);
+        CREATE INDEX idx_operational_stop_anchor ON operational_line_stop(station_anchor_id);
+        CREATE INDEX idx_operational_stop_region ON operational_line_stop(region);
+        CREATE INDEX idx_operational_edge_line ON operational_edge(operational_line_id);
+        CREATE INDEX idx_operational_edge_stops ON operational_edge(from_stop_id, to_stop_id);
+        CREATE INDEX idx_operational_edge_has_ge_edge ON operational_edge_has_graph_edge(operational_edge_id);
+        CREATE INDEX idx_operational_edge_has_ge_graph ON operational_edge_has_graph_edge(graph_edge_id);
         """
     )
 
+
 def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> None:
+    from .operational import build_and_write_operational_network
+
     route_keys: list[RouteKey] = model["route_keys"]  # type: ignore[assignment]
+    line_rows: list[tuple[int, RouteKey]] = model.get(  # type: ignore[assignment]
+        "line_rows",
+        [
+            (line_id, key)
+            for line_id, key in enumerate(route_keys, start=1)
+            if key.provider_type_code != "1"
+        ],
+    )
     station_rows: list[StationRow] = model["station_rows"]  # type: ignore[assignment]
     components: list[ComponentDraft] = model["components"]  # type: ignore[assignment]
     nodes: list[NodeRow] = model["nodes"]  # type: ignore[assignment]
@@ -195,7 +261,7 @@ def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> Non
                 key.name,
                 key.operator_name,
             )
-            for line_id, key in enumerate(route_keys, start=1)
+            for line_id, key in line_rows
         ],
     )
     connection.executemany(
@@ -267,12 +333,11 @@ def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> Non
         ],
     )
     connection.executemany(
-        "INSERT INTO network_node VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO network_node VALUES (?, ?, ?, ?, ?, ?)",
         [
             (
                 row.id,
                 row.line_id,
-                row.line_component_id,
                 row.lon,
                 row.lat,
                 row.topology_type,
@@ -282,12 +347,11 @@ def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> Non
         ],
     )
     connection.executemany(
-        "INSERT INTO atomic_segment VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO atomic_segment VALUES (?, ?, ?, ?, ?, ?)",
         [
             (
                 row.id,
                 row.line_id,
-                row.line_component_id,
                 row.from_node_id,
                 row.to_node_id,
                 row.length_m,
@@ -383,12 +447,19 @@ def write_model(connection: sqlite3.Connection, model: dict[str, object]) -> Non
         "INSERT INTO station_connection_has_graph_edge VALUES (?, ?, ?, ?, ?)",
         station_connection_has_graph_edge_rows,
     )
+    build_and_write_operational_network(connection)
 
 
 def validate_database(connection: sqlite3.Connection) -> None:
     foreign_key_errors = connection.execute("PRAGMA foreign_key_check").fetchall()
     if foreign_key_errors:
         raise RuntimeError(f"外部キー検査に失敗しました: {foreign_key_errors[:5]}")
+
+    shinkansen_rows = connection.execute(
+        "SELECT id, name FROM rail_line WHERE provider_type_code = '1'"
+    ).fetchall()
+    if shinkansen_rows:
+        raise RuntimeError(f"新幹線データが除去されていません: {shinkansen_rows[:5]}")
 
     station_source_errors = connection.execute(
         "SELECT id FROM station WHERE TRIM(source_id) = ''"

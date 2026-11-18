@@ -47,8 +47,7 @@ class StationRecord:
     name: str
     geometry_length_m: float
     geometry_status: str
-    betweenness_centrality: float = 0.0
-    harmonic_centrality: float = 0.0
+    region: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +66,6 @@ class StationComponentRecord:
 class NetworkNodeRecord:
     id: int
     line_id: int
-    line_component_id: int | None
     lon: float
     lat: float
     topology_type: str
@@ -78,7 +76,6 @@ class NetworkNodeRecord:
 class AtomicSegmentRecord:
     id: int
     line_id: int
-    line_component_id: int | None
     from_node_id: int
     to_node_id: int
     length_m: float
@@ -143,6 +140,57 @@ class StationConnectionHasGraphEdgeRecord:
     forward: int
 
 
+@dataclass(frozen=True, slots=True)
+class OperationalLineRecord:
+    id: int
+    line_code: str
+    name: str
+    operator_name: str
+    line_color: str | None
+    service_kind: str
+    is_loop: int
+    station_count: int
+    total_distance_m: float
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalLineStopRecord:
+    id: int
+    operational_line_id: int
+    stop_sequence: int
+    station_anchor_id: int
+    stop_name: str
+    pref_code: str
+    region: str | None
+    cumulative_distance_m: float
+    betweenness_centrality: float = 0.0
+    harmonic_centrality: float = 0.0
+    regional_betweenness_centrality: float | None = None
+    regional_harmonic_centrality: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalEdgeRecord:
+    id: int
+    operational_line_id: int
+    sequence_no: int
+    from_stop_id: int
+    to_stop_id: int
+    direction: str
+    distance_m: float
+    cost_s: float
+    skipped_station_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalEdgeHasGraphEdgeRecord:
+    id: int
+    operational_edge_id: int
+    sequence_no: int
+    graph_edge_id: int
+    forward: int
+
+
 DatabaseRecord: TypeAlias = (
     RailLineRecord
     | RailLineComponentRecord
@@ -156,6 +204,10 @@ DatabaseRecord: TypeAlias = (
     | GraphEdgeHasAtomicSegmentRecord
     | StationConnectionRecord
     | StationConnectionHasGraphEdgeRecord
+    | OperationalLineRecord
+    | OperationalLineStopRecord
+    | OperationalEdgeRecord
+    | OperationalEdgeHasGraphEdgeRecord
 )
 
 TABLE_RECORD_TYPES: dict[str, type[DatabaseRecord]] = {
@@ -171,6 +223,10 @@ TABLE_RECORD_TYPES: dict[str, type[DatabaseRecord]] = {
     "graph_edge_has_atomic_segment": GraphEdgeHasAtomicSegmentRecord,
     "station_connection": StationConnectionRecord,
     "station_connection_has_graph_edge": StationConnectionHasGraphEdgeRecord,
+    "operational_line": OperationalLineRecord,
+    "operational_line_stop": OperationalLineStopRecord,
+    "operational_edge": OperationalEdgeRecord,
+    "operational_edge_has_graph_edge": OperationalEdgeHasGraphEdgeRecord,
 }
 
 REQUIRED_TABLES = frozenset(TABLE_RECORD_TYPES)

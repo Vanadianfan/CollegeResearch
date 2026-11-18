@@ -404,6 +404,37 @@ def validate_database(connection: sqlite3.Connection) -> list[CheckResult]:
         )
     )
 
+    op_line_count = connection.execute(
+        "SELECT COUNT(*) FROM operational_line"
+    ).fetchone()[0]
+    op_stop_count = connection.execute(
+        "SELECT COUNT(*) FROM operational_line_stop"
+    ).fetchone()[0]
+    op_edge_count = connection.execute(
+        "SELECT COUNT(*) FROM operational_edge"
+    ).fetchone()[0]
+    region_stop_counts = dict(
+        connection.execute(
+            "SELECT region, COUNT(*) FROM operational_line_stop WHERE region IS NOT NULL GROUP BY region"
+        ).fetchall()
+    )
+    region_line_counts = dict(
+        connection.execute(
+            "SELECT region, COUNT(DISTINCT operational_line_id) FROM operational_line_stop WHERE region IS NOT NULL GROUP BY region"
+        ).fetchall()
+    )
+    results.append(
+        CheckResult(
+            "ERROR" if (op_line_count == 0 or op_stop_count == 0 or op_edge_count == 0) else "OK",
+            (
+                f"運営路線ネットワーク確認完了: {op_line_count} 路線 / "
+                f"{op_stop_count} 停車駅 / {op_edge_count} 接続 "
+                f"(地域別停車駅 東京圏={region_stop_counts.get('tokyo', 0)}駅/{region_line_counts.get('tokyo', 0)}路線, "
+                f"近畿圏={region_stop_counts.get('kinki', 0)}駅/{region_line_counts.get('kinki', 0)}路線)"
+            ),
+        )
+    )
+
     return results
 
 
@@ -496,6 +527,8 @@ def sql_filter(
 def load_visual_data(
     connection: sqlite3.Connection, line_ids: list[int] | None
 ) -> dict[str, Any]:
+    from collections import defaultdict, deque
+
     line_where, line_parameters = sql_filter(line_ids, "l", "id")
     lines = [
         {
@@ -517,6 +550,124 @@ def load_visual_data(
             line_parameters,
         )
     ]
+
+    stops_by_line: dict[int, dict[int, str | None]] = defaultdict(dict)
+    stop_region: dict[int, str | None] = {}
+    regions_by_op_line: dict[int, set[str]] = defaultdict(set)
+    for stop_id, op_line_id, reg in connection.execute(
+        "SELECT id, operational_line_id, region FROM operational_line_stop"
+    ):
+        sid = int(stop_id)
+        olid = int(op_line_id)
+        stops_by_line[olid][sid] = reg
+        stop_region[sid] = reg
+        if reg in ("tokyo", "kinki"):
+            regions_by_op_line[olid].add(str(reg))
+
+    op_lines = [
+        {
+            "id": row[0],
+            "code": row[1],
+            "name": row[2],
+            "operator": row[3],
+            "regions": sorted(regions_by_op_line.get(row[0], set())),
+            "color": row[4],
+            "service_kind": row[5],
+            "is_loop": bool(row[6]),
+            "station_count": row[7],
+            "total_distance_m": round(row[8], 1),
+        }
+        for row in connection.execute(
+            """
+            SELECT id, line_code, name, operator_name,
+                   line_color, service_kind, is_loop, station_count, total_distance_m
+            FROM operational_line
+            ORDER BY id
+            """
+        )
+    ]
+
+    pair_ges_by_line: dict[int, dict[tuple[int, int], set[int]]] = defaultdict(lambda: defaultdict(set))
+    for olid, u, v, ge_id in connection.execute(
+        """
+        SELECT oe.operational_line_id, oe.from_stop_id, oe.to_stop_id, h.graph_edge_id
+        FROM operational_edge AS oe
+        JOIN operational_edge_has_graph_edge AS h ON h.operational_edge_id = oe.id
+        WHERE oe.direction = 'forward'
+        """
+    ):
+        pair = (u, v) if u < v else (v, u)
+        pair_ges_by_line[int(olid)][pair].add(int(ge_id))
+
+    solid_ges_by_reg: dict[str, set[int]] = {"tokyo": set(), "kinki": set()}
+    dashed_ges_by_reg: dict[str, set[int]] = {"tokyo": set(), "kinki": set()}
+    for reg in ("tokyo", "kinki"):
+        for olid, smap in stops_by_line.items():
+            if reg not in regions_by_op_line.get(olid, ()):
+                continue
+            adj: dict[int, set[int]] = defaultdict(set)
+            for u, v in pair_ges_by_line.get(olid, ()):
+                adj[u].add(v)
+                adj[v].add(u)
+            peeled_out_stops: set[int] = set()
+            visited: set[int] = set()
+            for s in smap:
+                if smap[s] == reg or s in visited:
+                    continue
+                comp: set[int] = set()
+                boundary_in: set[int] = set()
+                q = deque([s])
+                visited.add(s)
+                while q:
+                    u = q.popleft()
+                    comp.add(u)
+                    for v in adj.get(u, ()):
+                        if smap.get(v) == reg:
+                            boundary_in.add(v)
+                        elif v not in visited:
+                            visited.add(v)
+                            q.append(v)
+                if len(boundary_in) <= 1:
+                    peeled_out_stops.update(comp)
+            for (u, v), ge_ids in pair_ges_by_line.get(olid, {}).items():
+                if u in peeled_out_stops or v in peeled_out_stops:
+                    dashed_ges_by_reg[reg].update(ge_ids)
+                else:
+                    solid_ges_by_reg[reg].update(ge_ids)
+
+    op_lines_by_edge: dict[int, list[int]] = {}
+    for graph_edge_id, op_line_id in connection.execute(
+        """
+        SELECT DISTINCT h.graph_edge_id, oe.operational_line_id
+        FROM operational_edge_has_graph_edge AS h
+        JOIN operational_edge AS oe ON oe.id = h.operational_edge_id
+        ORDER BY h.graph_edge_id, oe.operational_line_id
+        """
+    ):
+        op_lines_by_edge.setdefault(int(graph_edge_id), []).append(int(op_line_id))
+
+    edge_active_regions: dict[int, list[str]] = {}
+    edge_dashed_regions: dict[int, list[str]] = {}
+    all_ge_ids = (
+        solid_ges_by_reg["tokyo"]
+        | dashed_ges_by_reg["tokyo"]
+        | solid_ges_by_reg["kinki"]
+        | dashed_ges_by_reg["kinki"]
+    )
+    for ge_id in all_ge_ids:
+        act: list[str] = []
+        dsh: list[str] = []
+        for reg in ("kinki", "tokyo"):
+            in_solid = ge_id in solid_ges_by_reg[reg]
+            in_dashed = ge_id in dashed_ges_by_reg[reg]
+            if in_solid or in_dashed:
+                act.append(reg)
+                if not in_solid:
+                    dsh.append(reg)
+        if act:
+            edge_active_regions[ge_id] = act
+        if dsh:
+            edge_dashed_regions[ge_id] = dsh
 
     node_coords = {
         row[0]: (row[1], row[2])
@@ -558,6 +709,9 @@ def load_visual_data(
             {
                 "id": edge_id,
                 "line": line_id,
+                "op_lines": op_lines_by_edge.get(edge_id, []),
+                "regions": edge_active_regions.get(edge_id, []),
+                "dashed_regions": edge_dashed_regions.get(edge_id, []),
                 "distance": round(distance_m, 3),
                 "from": from_node_id,
                 "to": to_node_id,
@@ -572,6 +726,57 @@ def load_visual_data(
         if not item["points"]:
             item["points"].append(node_coords[start])
         item["points"].append(node_coords[end])
+
+    op_lines_by_station_id: dict[int, set[int]] = {}
+    op_lines_by_group_id: dict[int, set[int]] = {}
+    op_stops_by_station_id: dict[int, list[dict[str, object]]] = {}
+    for (
+        st_id,
+        grp_id,
+        op_line_id,
+        stop_id,
+        stop_name,
+        stop_region,
+        stop_bc,
+        stop_hc,
+        stop_rbc,
+        stop_rhc,
+    ) in connection.execute(
+        """
+        SELECT
+            sc.station_id,
+            s.group_id,
+            ols.operational_line_id,
+            ols.id,
+            ols.stop_name,
+            ols.region,
+            COALESCE(ols.betweenness_centrality, 0.0),
+            COALESCE(ols.harmonic_centrality, 0.0),
+            ols.regional_betweenness_centrality,
+            ols.regional_harmonic_centrality
+        FROM operational_line_stop AS ols
+        JOIN station_anchor AS a ON a.id = ols.station_anchor_id
+        JOIN station_component AS sc ON sc.id = a.station_component_id
+        JOIN station AS s ON s.id = sc.station_id
+        ORDER BY ols.operational_line_id, ols.id
+        """
+    ):
+        station_int = int(st_id)
+        op_line_int = int(op_line_id)
+        op_lines_by_station_id.setdefault(station_int, set()).add(op_line_int)
+        op_lines_by_group_id.setdefault(int(grp_id), set()).add(op_line_int)
+        op_stops_by_station_id.setdefault(station_int, []).append(
+            {
+                "stop_id": int(stop_id),
+                "op_line_id": op_line_int,
+                "stop_name": stop_name,
+                "region": stop_region,
+                "betweenness": round(float(stop_bc), 6),
+                "harmonic": round(float(stop_hc), 6),
+                "regional_betweenness": None if stop_rbc is None else round(float(stop_rbc), 6),
+                "regional_harmonic": None if stop_rhc is None else round(float(stop_rhc), 6),
+            }
+        )
 
     station_where, station_parameters = sql_filter(line_ids, "s")
     stations = [
@@ -590,8 +795,7 @@ def load_visual_data(
             "line": row[11],
             "line_name": row[12],
             "topology": row[13],
-            "betweenness": round(row[14], 6),
-            "harmonic": round(row[15], 6),
+            "region": row[14],
         }
         for row in connection.execute(
             """
@@ -611,8 +815,7 @@ def load_visual_data(
                 s.id, s.source_id, s.station_code, s.name,
                 g.id, g.group_code, g.display_name, g.passengers,
                 s.line_id, l.name, n.topology_type,
-                COALESCE(s.betweenness_centrality, 0.0),
-                COALESCE(s.harmonic_centrality, 0.0)
+                s.region
             FROM ranked_anchor AS ra
             JOIN station AS s ON s.id = ra.station_id
             JOIN station_group AS g ON g.id = s.group_id
@@ -626,7 +829,25 @@ def load_visual_data(
         )
     ]
     for station in stations:
-        station["graph_edges"] = sorted(edge_ids_by_node.get(station["node"], ()))
+        inc_edges = sorted(edge_ids_by_node.get(station["node"], ()))
+        station["graph_edges"] = inc_edges
+        station["op_stops"] = op_stops_by_station_id.get(station["station"], [])
+        direct_op = set(op_lines_by_station_id.get(station["station"], set()))
+        group_op = op_lines_by_group_id.get(station["group"], set())
+        for eid in inc_edges:
+            for olid in op_lines_by_edge.get(eid, ()):
+                if olid in group_op:
+                    direct_op.add(olid)
+        if not direct_op:
+            for eid in inc_edges:
+                direct_op.update(op_lines_by_edge.get(eid, ()))
+        station["op_lines"] = sorted(direct_op)
+        st_regions: set[str] = set()
+        if station["region"] in ("tokyo", "kinki"):
+            st_regions.add(station["region"])
+        for eid in inc_edges:
+            st_regions.update(edges_by_id.get(eid, {}).get("regions", ()))
+        station["regions"] = sorted(st_regions)
 
     junction_where, junction_parameters = sql_filter(line_ids, "n")
     junctions = [
@@ -642,6 +863,21 @@ def load_visual_data(
             junction_parameters,
         )
     ]
+    for junction in junctions:
+        j_regions: set[str] = set()
+        j_solid_regions: set[str] = set()
+        j_has_op_line = False
+        for eid in edge_ids_by_node.get(junction["node"], ()):
+            e_item = edges_by_id.get(eid, {})
+            if e_item.get("op_lines"):
+                j_has_op_line = True
+            e_regs = set(e_item.get("regions", ()))
+            e_dashed = set(e_item.get("dashed_regions", ()))
+            j_regions.update(e_regs)
+            j_solid_regions.update(e_regs - e_dashed)
+        junction["has_op_line"] = j_has_op_line
+        junction["regions"] = sorted(j_regions)
+        junction["dashed_regions"] = sorted(j_regions - j_solid_regions)
 
     all_points = [point for edge in edges_by_id.values() for point in edge["points"]]
     if not all_points:
@@ -649,6 +885,41 @@ def load_visual_data(
     lons = [point[0] for point in all_points]
     lats = [point[1] for point in all_points]
     connections = [
+        {
+            "id": row[0],
+            "from": row[1],
+            "to": row[2],
+            "distance": round(row[3], 2),
+            "time_cost": round((row[3] / (50000.0 / 3600.0)) + 30.0, 1),
+            "shinkansen": False,
+            "op_line_id": row[5],
+            "op_line_name": row[6],
+            "graph_edges": [int(x) for x in (row[4] or "").split(",") if x],
+        }
+        for row in connection.execute("""
+            SELECT
+                oe.id,
+                sc_from.station_id,
+                sc_to.station_id,
+                oe.distance_m,
+                GROUP_CONCAT(h.graph_edge_id),
+                ol.id,
+                ol.name
+            FROM operational_edge AS oe
+            JOIN operational_line AS ol ON ol.id = oe.operational_line_id
+            JOIN operational_line_stop AS s_from ON s_from.id = oe.from_stop_id
+            JOIN station_anchor AS a_from ON a_from.id = s_from.station_anchor_id
+            JOIN station_component AS sc_from ON sc_from.id = a_from.station_component_id
+            JOIN operational_line_stop AS s_to ON s_to.id = oe.to_stop_id
+            JOIN station_anchor AS a_to ON a_to.id = s_to.station_anchor_id
+            JOIN station_component AS sc_to ON sc_to.id = a_to.station_component_id
+            LEFT JOIN operational_edge_has_graph_edge AS h ON h.operational_edge_id = oe.id
+            WHERE oe.direction = 'forward'
+            GROUP BY oe.id
+        """)
+    ]
+
+    legacy_connections = [
         {
             "id": row[0],
             "from": row[1],
@@ -682,6 +953,7 @@ def load_visual_data(
 
     counts = {
         "lines": len(lines),
+        "op_lines": len(op_lines),
         "edges": len(edges_by_id),
         "stations": len(stations),
         "junctions": len(junctions),
@@ -690,10 +962,12 @@ def load_visual_data(
         "bounds": [min(lons), min(lats), max(lons), max(lats)],
         "counts": counts,
         "lines": lines,
+        "op_lines": op_lines,
         "edges": list(edges_by_id.values()),
         "stations": stations,
         "junctions": junctions,
         "connections": connections,
+        "legacy_connections": legacy_connections,
     }
 
 
@@ -702,7 +976,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>N02 鉄道ネットワーク検証</title>
+<title>鉄道ネットワーク検証</title>
 <style>
 :root {
   color-scheme: light dark;
@@ -713,6 +987,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   --border: rgba(23, 33, 43, .22);
   --rail: #687784;
   --station: #d54838;
+  --station-muted: #8a939e;
   --junction: #166e7a;
   --selected: #e69121;
   --grid: rgba(23, 33, 43, .08);
@@ -732,6 +1007,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     --border: rgba(232, 237, 241, .20);
     --rail: #8495a3;
     --station: #ff7666;
+    --station-muted: #7c8591;
     --junction: #62c4d0;
     --selected: #ffc56b;
     --grid: rgba(232, 237, 241, .07);
@@ -787,7 +1063,7 @@ canvas.dragging { cursor: grabbing; }
   border-radius: 8px;
   backdrop-filter: blur(8px);
   pointer-events: none;
-  white-space: pre-line;
+  white-space: pre-wrap;
 }
 .detail.route-detail {
   width: min(440px, calc(100% - 24px));
@@ -824,6 +1100,45 @@ canvas.dragging { cursor: grabbing; }
   justify-items: end;
   gap: 8px;
 }
+.region-bar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(8px);
+  z-index: 20;
+}
+.region-tab {
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.region-tab:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+.region-tab.active {
+  background: var(--selected);
+  color: #11171d;
+}
+.region-tab:focus-visible {
+  outline: 2px solid var(--selected);
+  outline-offset: 2px;
+}
 .route-mode-control {
   display: flex;
   align-items: center;
@@ -852,6 +1167,9 @@ canvas.dragging { cursor: grabbing; }
   cursor: pointer;
 }
 .reset:focus-visible { outline: 2px solid var(--selected); outline-offset: 2px; }
+@media (max-width: 780px) {
+  .region-bar { top: auto; bottom: 58px; }
+}
 @media (max-width: 520px) {
   .hud { right: 12px; top: 160px; max-width: none; }
   .top-controls { left: 12px; justify-items: stretch; }
@@ -890,11 +1208,17 @@ canvas.dragging { cursor: grabbing; }
     <span><i class="dot line-dot"></i>接続</span>
   </div>
 </section>
+<nav class="region-bar" id="region-bar" role="tablist" aria-label="表示地域選択">
+  <button type="button" class="region-tab" data-region="legacy" role="tab" aria-selected="false">旧版全体</button>
+  <button type="button" class="region-tab active" data-region="all" role="tab" aria-selected="true">全体</button>
+  <button type="button" class="region-tab" data-region="tokyo" role="tab" aria-selected="false">東京圏</button>
+  <button type="button" class="region-tab" data-region="kinki" role="tab" aria-selected="false">近畿圏</button>
+</nav>
 <div class="top-controls">
   <label class="route-mode-control" for="route-mode">
     <span class="route-mode-copy">
       <strong>路線モードを開きますか？</strong>
-      <small>命中した路線全体を色分けして確認</small>
+      <small id="route-mode-hint">命中した運営路線（ekidata）全体を色分け表示</small>
     </span>
     <input id="route-mode" type="checkbox">
   </label>
@@ -913,12 +1237,18 @@ canvas.dragging { cursor: grabbing; }
   const counts = document.getElementById("counts");
   const resetButton = document.getElementById("reset");
   const routeModeToggle = document.getElementById("route-mode");
+  const routeModeHint = document.getElementById("route-mode-hint");
+  const regionBar = document.getElementById("region-bar");
+  const regionTabs = Array.from(regionBar.querySelectorAll(".region-tab"));
   const styles = () => getComputedStyle(document.documentElement);
   const tau = Math.PI * 2;
   const maxMercatorLat = 85.05112878;
   const edgeHitRadius = 12;
   const coincidentEdgeTolerance = 0.75;
   const parallelDirectionThreshold = Math.cos(15 * Math.PI / 180);
+  const coordOverlapTolerance = 1e-7;
+  const worldOverlapTolerance = 1e-10;
+  const worldOverlapParallelThreshold = Math.cos(5 * Math.PI / 180);
   const pointers = new Map();
   let dpr = 1;
   let width = 1;
@@ -930,13 +1260,23 @@ canvas.dragging { cursor: grabbing; }
   let hovered = null;
   let selected = null;
   let routeMode = false;
+  let currentRegion = "all";
   let framePending = false;
 
   const lineById = new Map(data.lines.map(line => [line.id, line]));
+  const opLineById = new Map((data.op_lines || []).map(op => [op.id, op]));
   const edgeById = new Map(data.edges.map(edge => [edge.id, edge]));
   const edgesByLine = new Map();
+  const edgesByOpLine = new Map();
   const stationNodes = new Set(data.stations.map(station => station.node));
   const stationsByGroup = new Map();
+
+  let activeEdges = [];
+  let activeEdgeSet = new Set();
+  let activeStations = [];
+  let activeJunctions = [];
+  let activeBounds = data.bounds.slice();
+
   data.edges.forEach(edge => {
     edge.world = edge.points.map(point => project(point[0], point[1]));
     const xs = edge.world.map(point => point[0]);
@@ -945,20 +1285,104 @@ canvas.dragging { cursor: grabbing; }
     const lineEdges = edgesByLine.get(edge.line) || [];
     lineEdges.push(edge);
     edgesByLine.set(edge.line, lineEdges);
+    for (const opLineId of edge.op_lines || []) {
+      const opEdges = edgesByOpLine.get(opLineId) || [];
+      opEdges.push(edge);
+      edgesByOpLine.set(opLineId, opEdges);
+    }
   });
   data.stations.forEach(station => {
     station.world = project(station.lon, station.lat);
-    const members = stationsByGroup.get(station.group) || [];
-    members.push(station);
-    stationsByGroup.set(station.group, members);
   });
   data.junctions = data.junctions.filter(junction => !stationNodes.has(junction.node));
   data.junctions.forEach(junction => { junction.world = project(junction.lon, junction.lat); });
 
-  counts.textContent = `${data.counts.lines.toLocaleString()} 路線・` +
-    `${data.counts.stations.toLocaleString()} 駅・` +
-    `${data.counts.junctions.toLocaleString()} 分岐・` +
-    `${data.counts.edges.toLocaleString()} 接続`;
+  function isLegacyMode(region = currentRegion) {
+    return region === "legacy";
+  }
+
+  function regionLabel(region) {
+    if (region === "legacy") return "旧版全体（N02）";
+    if (region === "tokyo") return "東京圏";
+    if (region === "kinki") return "近畿圏";
+    if (region === "all") return "全体";
+    return "その他";
+  }
+
+  function isEdgeDashed(edge, region = currentRegion) {
+    if (isLegacyMode(region)) return false;
+    if (region === "all") return !(edge.op_lines && edge.op_lines.length);
+    return (edge.dashed_regions || []).includes(region);
+  }
+
+  function applyRegionFilter(region) {
+    currentRegion = region;
+    for (const tab of regionTabs) {
+      const isSelected = tab.dataset.region === region;
+      tab.classList.toggle("active", isSelected);
+      tab.setAttribute("aria-selected", isSelected ? "true" : "false");
+    }
+
+    const legacy = isLegacyMode(region);
+    if (routeModeHint) {
+      routeModeHint.textContent = legacy
+        ? "命中したN02路線（rail_line）全体を色分け表示"
+        : "命中した運営路線（ekidata）全体を色分け表示";
+    }
+
+    if (region === "all" || legacy) {
+      activeEdges = data.edges;
+      activeStations = data.stations;
+      activeJunctions = data.junctions;
+    } else {
+      activeEdges = data.edges.filter(edge => (edge.regions || []).includes(region));
+      activeStations = data.stations.filter(station => (station.regions || []).includes(region));
+      activeJunctions = data.junctions.filter(junction => (junction.regions || []).includes(region));
+    }
+    activeEdgeSet = new Set(activeEdges.map(edge => edge.id));
+
+    stationsByGroup.clear();
+    for (const station of activeStations) {
+      const members = stationsByGroup.get(station.group) || [];
+      members.push(station);
+      stationsByGroup.set(station.group, members);
+    }
+
+    const solidEdgesForBounds = (region === "all" || legacy)
+      ? activeEdges
+      : activeEdges.filter(edge => !isEdgeDashed(edge, region));
+    const boundsEdges = solidEdgesForBounds.length ? solidEdgesForBounds : activeEdges;
+    let minLon = Infinity, minLat = Infinity, maxLon = -Infinity, maxLat = -Infinity;
+    for (const edge of boundsEdges) {
+      for (const pt of edge.points) {
+        if (pt[0] < minLon) minLon = pt[0];
+        if (pt[1] < minLat) minLat = pt[1];
+        if (pt[0] > maxLon) maxLon = pt[0];
+        if (pt[1] > maxLat) maxLat = pt[1];
+      }
+    }
+    activeBounds = Number.isFinite(minLon) ? [minLon, minLat, maxLon, maxLat] : data.bounds.slice();
+
+    if (legacy) {
+      counts.textContent = `【${regionLabel(region)}】${data.counts.lines.toLocaleString()} 路線・` +
+        `${activeStations.length.toLocaleString()} 駅・` +
+        `${activeJunctions.length.toLocaleString()} 分岐・` +
+        `${activeEdges.length.toLocaleString()} 接続`;
+      return;
+    }
+
+    const opLineCount = region === "all"
+      ? (data.op_lines || []).length
+      : (data.op_lines || []).filter(op => (op.regions || []).includes(region)).length;
+    const n02LineCount = region === "all"
+      ? data.lines.length
+      : new Set(activeEdges.map(edge => edge.line)).size;
+
+    counts.textContent = `【${regionLabel(region)}】運営路線 ${opLineCount.toLocaleString()}（N02: ${n02LineCount.toLocaleString()}）・` +
+      `${activeStations.length.toLocaleString()} 駅・` +
+      `${activeJunctions.length.toLocaleString()} 分岐・` +
+      `${activeEdges.length.toLocaleString()} 接続`;
+  }
 
   function project(lon, lat) {
     const safeLat = Math.max(-maxMercatorLat, Math.min(maxMercatorLat, lat));
@@ -973,8 +1397,8 @@ canvas.dragging { cursor: grabbing; }
   }
 
   function resetView() {
-    const min = project(data.bounds[0], data.bounds[3]);
-    const max = project(data.bounds[2], data.bounds[1]);
+    const min = project(activeBounds[0], activeBounds[3]);
+    const max = project(activeBounds[2], activeBounds[1]);
     const spanX = Math.max(1e-9, max[0] - min[0]);
     const spanY = Math.max(1e-9, max[1] - min[1]);
     const padding = Math.min(54, Math.max(18, Math.min(width, height) * 0.06));
@@ -982,6 +1406,7 @@ canvas.dragging { cursor: grabbing; }
     view.scale = fitScale;
     view.tx = (width - (min[0] + max[0]) * fitScale) / 2;
     view.ty = (height - (min[1] + max[1]) * fitScale) / 2;
+    hovered = null;
     selected = null;
     updateDetail();
     requestDraw();
@@ -1066,8 +1491,10 @@ canvas.dragging { cursor: grabbing; }
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
-    function strokeEdge(edge, color, lineWidth) {
+    function strokeEdge(edge, color, lineWidth, dashed = false) {
       if (!visibleBox(edge.box)) return;
+      ctx.save();
+      ctx.setLineDash(dashed ? [6, 5] : []);
       ctx.strokeStyle = color;
       ctx.lineWidth = lineWidth;
       ctx.beginPath();
@@ -1076,20 +1503,45 @@ canvas.dragging { cursor: grabbing; }
         if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.stroke();
+      ctx.restore();
     }
 
-    for (const edge of data.edges) {
+    const dashedEdges = [];
+    const solidEdges = [];
+    for (const edge of activeEdges) {
+      if (isEdgeDashed(edge)) dashedEdges.push(edge);
+      else solidEdges.push(edge);
+    }
+    for (const edge of dashedEdges) {
       const active = !routeMode && isActive("edge", edge.id);
-      strokeEdge(edge, active ? selectedColor : rail, active ? 3.2 : 1.25);
+      strokeEdge(edge, active ? selectedColor : rail, active ? 3.2 : 1.25, true);
+    }
+    for (const edge of solidEdges) {
+      const active = !routeMode && isActive("edge", edge.id);
+      strokeEdge(edge, active ? selectedColor : rail, active ? 3.2 : 1.25, false);
     }
 
     if (!routeMode) return;
     const match = routeMatch(hovered || selected);
-    match.lineIds.forEach((lineId, index) => {
-      const widthOffset = (match.lineIds.length - index - 1) * 1.45;
+    if (isLegacyMode()) {
+      match.lineIds.forEach((lineId, index) => {
+        const widthOffset = (match.lineIds.length - index - 1) * 1.45;
+        const color = css.getPropertyValue(`--route-${index % 6 + 1}`);
+        for (const edge of edgesByLine.get(lineId) || []) {
+          if (activeEdgeSet.has(edge.id)) strokeEdge(edge, color, 3.4 + widthOffset, false);
+        }
+      });
+      return;
+    }
+    match.opLineIds.forEach((opLineId, index) => {
+      const widthOffset = (match.opLineIds.length - index - 1) * 1.45;
       const color = css.getPropertyValue(`--route-${index % 6 + 1}`);
-      for (const edge of edgesByLine.get(lineId) || []) {
-        strokeEdge(edge, color, 3.4 + widthOffset);
+      const lineActiveEdges = (edgesByOpLine.get(opLineId) || []).filter(edge => activeEdgeSet.has(edge.id));
+      for (const edge of lineActiveEdges) {
+        if (isEdgeDashed(edge)) strokeEdge(edge, color, 3.4 + widthOffset, true);
+      }
+      for (const edge of lineActiveEdges) {
+        if (!isEdgeDashed(edge)) strokeEdge(edge, color, 3.4 + widthOffset, false);
       }
     });
   }
@@ -1104,11 +1556,42 @@ canvas.dragging { cursor: grabbing; }
       for (const station of stations) {
         for (const edgeId of station.graph_edges || []) {
           const edge = edgeById.get(edgeId);
-          if (edge) edges.push(edge);
+          if (edge && activeEdgeSet.has(edge.id)) edges.push(edge);
         }
       }
     }
     const uniqueEdges = [...new Map(edges.map(edge => [edge.id, edge])).values()];
+    const opLineIds = [];
+    const seenOpLineIds = new Set();
+    const pushOpLine = (opLineId) => {
+      if (seenOpLineIds.has(opLineId)) return;
+      const opLine = opLineById.get(opLineId);
+      if (!opLine) return;
+      seenOpLineIds.add(opLineId);
+      opLineIds.push(opLineId);
+    };
+
+    if (feature && feature.type === "station") {
+      for (const station of stations) {
+        for (const opLineId of station.op_lines || []) {
+          pushOpLine(opLineId);
+        }
+      }
+      if (opLineIds.length === 0) {
+        for (const edge of uniqueEdges) {
+          for (const opLineId of edge.op_lines || []) {
+            pushOpLine(opLineId);
+          }
+        }
+      }
+    } else {
+      for (const edge of uniqueEdges) {
+        for (const opLineId of edge.op_lines || []) {
+          pushOpLine(opLineId);
+        }
+      }
+    }
+
     const lineIds = [];
     const seenLineIds = new Set();
     for (const edge of uniqueEdges) {
@@ -1123,23 +1606,30 @@ canvas.dragging { cursor: grabbing; }
         lineIds.push(station.line);
       }
     }
-    return { edges: uniqueEdges, stations, lineIds };
+    return { edges: uniqueEdges, stations, opLineIds, lineIds };
   }
 
   function drawJunctions(css) {
     const nodeScale = routeNodeScale();
-    ctx.strokeStyle = css.getPropertyValue("--junction");
+    const junctionColor = css.getPropertyValue("--junction");
+    const mutedColor = css.getPropertyValue("--station-muted");
     ctx.fillStyle = css.getPropertyValue("--background");
     ctx.lineWidth = routeMode
       ? Math.max(0.15, Math.min(1.7, 0.45 * nodeScale))
       : 1.7;
-    for (const junction of data.junctions) {
+    for (const junction of activeJunctions) {
       const [x, y] = screen(junction.world);
       if (x < -9 || x > width + 9 || y < -9 || y > height + 9) continue;
       const active = isActive("junction", junction.node);
+      const isMuted = isLegacyMode()
+        ? false
+        : (currentRegion === "all"
+            ? !junction.has_op_line
+            : (junction.dashed_regions || []).includes(currentRegion));
       const radius = routeMode
         ? Math.min(active ? 5 : 3.4, (active ? 1.4 : 1) * nodeScale)
         : active ? 5 : 3.4;
+      ctx.strokeStyle = isMuted ? mutedColor : junctionColor;
       ctx.beginPath();
       ctx.arc(x, y, radius, 0, tau);
       ctx.fill();
@@ -1149,21 +1639,28 @@ canvas.dragging { cursor: grabbing; }
 
   function drawStations(css) {
     const stationColor = css.getPropertyValue("--station");
+    const stationMutedColor = css.getPropertyValue("--station-muted");
+    const junctionColor = css.getPropertyValue("--junction");
     const selectedColor = css.getPropertyValue("--selected");
     const activeGroup = activeStationGroup();
     const nodeScale = routeNodeScale();
-    for (const station of data.stations) {
+    for (const station of activeStations) {
       const [x, y] = screen(station.world);
       if (x < -9 || x > width + 9 || y < -9 || y > height + 9) continue;
+      const inRegion = isLegacyMode()
+        ? true
+        : (currentRegion === "all"
+            ? Boolean(station.op_lines && station.op_lines.length)
+            : station.region === currentRegion);
       const active = routeMode
         ? isActive("station", station.station)
         : activeGroup !== null && station.group === activeGroup;
       ctx.beginPath();
       ctx.arc(x, y, (routeMode ? Math.min(3.1, 0.8 * nodeScale) : 3.1), 0, tau);
-      ctx.fillStyle = active ? selectedColor : stationColor;
+      ctx.fillStyle = active ? selectedColor : (inRegion ? stationColor : stationMutedColor);
       ctx.fill();
       if (station.topology === "junction") {
-        ctx.strokeStyle = css.getPropertyValue("--junction");
+        ctx.strokeStyle = inRegion ? junctionColor : stationMutedColor;
         ctx.lineWidth = routeMode
           ? Math.max(0.15, Math.min(1.5, 0.35 * nodeScale))
           : 1.5;
@@ -1203,14 +1700,14 @@ canvas.dragging { cursor: grabbing; }
       }
     }
     if (showAllStations) {
-      for (const station of data.stations) {
+      for (const station of activeStations) {
         if (station.group !== activeGroup) drawStationLabel(station);
       }
     }
 
     if (zoom < 4.2) return;
     ctx.font = '11px "Hiragino Sans", "Hiragino Kaku Gothic ProN", -apple-system, BlinkMacSystemFont, "Yu Gothic", YuGothic, sans-serif';
-    for (const edge of data.edges) {
+    for (const edge of activeEdges) {
       if (!visibleBox(edge.box)) continue;
       const screenPoints = edge.world.map(screen);
       const screenLength = polylineLength(screenPoints);
@@ -1297,35 +1794,45 @@ canvas.dragging { cursor: grabbing; }
     requestDraw();
   }
 
+  function coordsOverlap(a, b) {
+    return Math.abs(a.lon - b.lon) <= coordOverlapTolerance &&
+      Math.abs(a.lat - b.lat) <= coordOverlapTolerance;
+  }
+
+  function edgeOverlapsAtWorldSegment(edge, hitWorld, refVec) {
+    const [wx, wy] = hitWorld;
+    const [minX, minY, maxX, maxY] = edge.box;
+    if (
+      wx < minX - worldOverlapTolerance ||
+      wx > maxX + worldOverlapTolerance ||
+      wy < minY - worldOverlapTolerance ||
+      wy > maxY + worldOverlapTolerance
+    ) {
+      return false;
+    }
+    const pts = edge.world;
+    for (let i = 1; i < pts.length; i += 1) {
+      const seg = pointSegmentHit(wx, wy, pts[i - 1], pts[i], i);
+      if (seg.distance <= worldOverlapTolerance && directionsAreParallel(seg, refVec, worldOverlapParallelThreshold)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function nearestFeature(x, y) {
     let best = null;
     const hitRadius = nodeHitRadius();
     let bestDistance = hitRadius;
-    const stationCandidates = [];
-    for (const station of data.stations) {
+    for (const station of activeStations) {
       const point = screen(station.world);
       const distance = Math.hypot(point[0] - x, point[1] - y);
-      if (distance < hitRadius) stationCandidates.push({ station, distance });
       if (distance < bestDistance) {
         bestDistance = distance;
         best = { type: "station", id: station.station, item: station };
       }
     }
-    if (routeMode && stationCandidates.length) {
-      stationCandidates.sort((a, b) => a.distance - b.distance || a.station.station - b.station.station);
-      const nearestDistance = stationCandidates[0].distance;
-      const stations = stationCandidates
-        .filter(candidate => candidate.distance <= nearestDistance + coincidentEdgeTolerance)
-        .map(candidate => candidate.station);
-      return {
-        type: "station",
-        id: stations[0].station,
-        ids: stations.map(station => station.station),
-        item: stations[0],
-        items: stations,
-      };
-    }
-    for (const junction of data.junctions) {
+    for (const junction of activeJunctions) {
       const point = screen(junction.world);
       const distance = Math.hypot(point[0] - x, point[1] - y);
       if (distance < bestDistance) {
@@ -1333,10 +1840,44 @@ canvas.dragging { cursor: grabbing; }
         best = { type: "junction", id: junction.node, item: junction };
       }
     }
-    if (best) return best;
+    if (best) {
+      if (!routeMode) return best;
+      if (best.type === "station") {
+        const overlapping = [
+          best.item,
+          ...activeStations.filter(
+            station => station.station !== best.item.station && coordsOverlap(station, best.item)
+          ),
+        ];
+        return overlapping.length === 1
+          ? best
+          : {
+              type: "station",
+              id: overlapping[0].station,
+              ids: overlapping.map(station => station.station),
+              item: overlapping[0],
+              items: overlapping,
+            };
+      }
+      const overlapping = [
+        best.item,
+        ...activeJunctions.filter(
+          junction => junction.node !== best.item.node && coordsOverlap(junction, best.item)
+        ),
+      ];
+      return overlapping.length === 1
+        ? best
+        : {
+            type: "junction",
+            id: overlapping[0].node,
+            ids: overlapping.map(junction => junction.node),
+            item: overlapping[0],
+            items: overlapping,
+          };
+    }
 
     const edgeCandidates = [];
-    for (const edge of data.edges) {
+    for (const edge of activeEdges) {
       if (!visibleBox(edge.box, edgeHitRadius)) continue;
       const hit = nearestPointOnEdge(edge, x, y);
       if (hit && hit.distance < edgeHitRadius) edgeCandidates.push({ edge, hit });
@@ -1345,6 +1886,35 @@ canvas.dragging { cursor: grabbing; }
 
     edgeCandidates.sort((a, b) => a.hit.distance - b.hit.distance || a.edge.id - b.edge.id);
     const nearest = edgeCandidates[0];
+    if (routeMode) {
+      const wA = nearest.edge.world[nearest.hit.segIndex - 1];
+      const wB = nearest.edge.world[nearest.hit.segIndex];
+      const hitWorld = [
+        wA[0] + nearest.hit.ratio * (wB[0] - wA[0]),
+        wA[1] + nearest.hit.ratio * (wB[1] - wA[1]),
+      ];
+      const refVec = { dx: wB[0] - wA[0], dy: wB[1] - wA[1] };
+      const overlapping = [
+        nearest.edge,
+        ...activeEdges.filter(
+          edge => edge.id !== nearest.edge.id && edgeOverlapsAtWorldSegment(edge, hitWorld, refVec)
+        ),
+      ];
+      if (overlapping.length === 1) {
+        return {
+          type: "edge",
+          id: nearest.edge.id,
+          item: nearest.edge,
+        };
+      }
+      return {
+        type: "edge",
+        id: overlapping[0].id,
+        ids: overlapping.map(edge => edge.id),
+        item: overlapping[0],
+        items: overlapping,
+      };
+    }
     const coincident = edgeCandidates.filter(candidate =>
       candidate.hit.distance <= nearest.hit.distance + coincidentEdgeTolerance &&
       directionsAreParallel(candidate.hit, nearest.hit)
@@ -1363,13 +1933,13 @@ canvas.dragging { cursor: grabbing; }
     const points = edge.world.map(screen);
     let nearest = null;
     for (let i = 1; i < points.length; i += 1) {
-      const hit = pointSegmentHit(x, y, points[i - 1], points[i]);
+      const hit = pointSegmentHit(x, y, points[i - 1], points[i], i);
       if (!nearest || hit.distance < nearest.distance) nearest = hit;
     }
     return nearest;
   }
 
-  function pointSegmentHit(x, y, a, b) {
+  function pointSegmentHit(x, y, a, b, segIndex = 1) {
     const dx = b[0] - a[0];
     const dy = b[1] - a[1];
     const lengthSquared = dx * dx + dy * dy;
@@ -1378,15 +1948,17 @@ canvas.dragging { cursor: grabbing; }
       distance: Math.hypot(x - (a[0] + ratio * dx), y - (a[1] + ratio * dy)),
       dx,
       dy,
+      ratio,
+      segIndex,
     };
   }
 
-  function directionsAreParallel(a, b) {
+  function directionsAreParallel(a, b, threshold = parallelDirectionThreshold) {
     const aLength = Math.hypot(a.dx, a.dy);
     const bLength = Math.hypot(b.dx, b.dy);
     if (aLength === 0 || bLength === 0) return false;
     const cosine = Math.abs((a.dx * b.dx + a.dy * b.dy) / (aLength * bLength));
-    return cosine >= parallelDirectionThreshold;
+    return cosine >= threshold;
   }
 
   function escapeHtml(value) {
@@ -1399,38 +1971,170 @@ canvas.dragging { cursor: grabbing; }
     return edges.length ? edges.map(edge => `#${edge.id}`).join("、") : "なし";
   }
 
+  function formatStopCentralityEntries(stop) {
+    if (currentRegion === "tokyo" || currentRegion === "kinki") {
+      const label = regionLabel(currentRegion);
+      if (
+        stop.region === currentRegion
+        && stop.regional_betweenness !== null
+        && stop.regional_betweenness !== undefined
+      ) {
+        return [
+          `媒介中心性（${label}）：${Number(stop.regional_betweenness).toExponential(4)}`,
+          `調和中心性（${label}）：${Number(stop.regional_harmonic).toExponential(4)}`,
+        ];
+      }
+      return [
+        `媒介中心性（${label}）：圏外（NULL）`,
+        `調和中心性（${label}）：圏外（NULL）`,
+      ];
+    }
+    return [
+      `媒介中心性（Betweenness）：${Number(stop.betweenness || 0).toExponential(4)}`,
+      `調和中心性（Harmonic）：${Number(stop.harmonic || 0).toExponential(4)}`,
+    ];
+  }
+
+  function formatStopCentralityLines(station) {
+    const stops = station.op_stops || [];
+    if (!stops.length) {
+      const members = stationsByGroup.get(station.group) || [station];
+      const otherStopCount = members.reduce(
+        (acc, member) => acc + (member.station === station.station ? 0 : (member.op_stops || []).length),
+        0
+      );
+      if (otherStopCount > 0) {
+        return [`運営路線と中心性：該当アンカーに直接対応なし（同グループ他駅に ${otherStopCount} 件）`];
+      }
+      return ["運営路線と中心性：なし（運営停車駅なし）"];
+    }
+    const lines = ["運営路線と中心性："];
+    for (const stop of stops) {
+      const op = opLineById.get(stop.op_line_id);
+      const opName = op ? op.name : `運営路線#${stop.op_line_id}`;
+      lines.push(`・${opName}`);
+      for (const metricLine of formatStopCentralityEntries(stop)) {
+        lines.push(` - ${metricLine}`);
+      }
+    }
+    return lines;
+  }
+
   function updateRouteDetail(feature) {
     if (!feature || !["edge", "station"].includes(feature.type)) return false;
     const match = routeMatch(feature);
     const heading = feature.type === "edge"
       ? `命中 graph_edge：${graphEdgeNumbers(match.edges)}`
       : `駅：${[...new Set(match.stations.map(station => station.station_name))].map(escapeHtml).join("、")}`;
-    const edgeSummary = feature.type === "station"
-      ? `<div class="route-detail-summary">関連 graph_edge：${graphEdgeNumbers(match.edges)}</div>`
-      : "";
-    const entries = match.lineIds.map((lineId, index) => {
-      const line = lineById.get(lineId);
-      const hitEdges = match.edges.filter(edge => edge.line === lineId);
-      const allEdges = edgesByLine.get(lineId) || [];
-      const name = line ? line.name : "不明な路線";
-      const operator = line ? line.operator : "不明";
-      const railwayType = line ? line.railway_type_code : "不明";
-      const providerType = line ? line.provider_type_code : "不明";
+
+    if (isLegacyMode()) {
+      const edgeSummary = feature.type === "station"
+        ? `<div class="route-detail-summary">関連 graph_edge：${graphEdgeNumbers(match.edges)}</div>`
+        : "";
+      const entries = match.lineIds.map((lineId, index) => {
+        const line = lineById.get(lineId);
+        const hitEdges = match.edges.filter(edge => edge.line === lineId);
+        const allEdges = (edgesByLine.get(lineId) || []).filter(edge => activeEdgeSet.has(edge.id));
+        const name = line ? line.name : "不明な路線";
+        const operator = line ? line.operator : "不明";
+        const railwayType = line ? line.railway_type_code : "不明";
+        const providerType = line ? line.provider_type_code : "不明";
+        return `<section class="route-entry route-color-${index % 6 + 1}">
+          <div class="route-entry-title"><i class="route-swatch"></i>rail_line #${lineId}</div>
+          <dl>
+            <dt>路線名</dt><dd>${escapeHtml(name)}</dd>
+            <dt>事業者</dt><dd>${escapeHtml(operator)}</dd>
+            <dt>鉄道区分コード</dt><dd>${escapeHtml(railwayType)}</dd>
+            <dt>事業者区分コード</dt><dd>${escapeHtml(providerType)}</dd>
+            <dt>命中 graph_edge</dt><dd>${graphEdgeNumbers(hitEdges)}</dd>
+            <dt>路線全体</dt><dd>${allEdges.length.toLocaleString("ja-JP")} graph_edge</dd>
+          </dl>
+        </section>`;
+      }).join("");
+      detail.classList.add("route-detail");
+      detail.innerHTML = `<div class="route-detail-heading">${heading}</div>${edgeSummary}
+        <div class="route-detail-summary">命中 rail_line：${match.lineIds.length}件</div>${entries}`;
+      return true;
+    }
+
+    let physicalSummary = "";
+    if (feature.type === "station") {
+      const groupEntries = [...new Map(match.stations.map(st => [st.group, st])).values()];
+      const groupText = groupEntries.map(st => {
+        const passengers = st.passengers === null
+          ? "欠測"
+          : `${st.passengers.toLocaleString("ja-JP")} 人/日`;
+        return `#${st.group}（コード: ${escapeHtml(st.group_code)}｜2024乗降客数: ${escapeHtml(passengers)}）`;
+      }).join("、");
+      const stationText = match.stations.map(st =>
+        `#${st.station}（出典ID: ${escapeHtml(st.source_id)}｜駅コード: ${escapeHtml(st.station_code)}）`
+      ).join("、");
+      const n02Lines = match.lineIds.map(lid => {
+        const l = lineById.get(lid);
+        return l ? `#${lid} ${l.name}（${l.operator}）` : `#${lid}`;
+      }).join("、");
+      const summaryLines = [
+        `<div class="route-detail-summary">駅グループ：${groupText}</div>`,
+        `<div class="route-detail-summary">N02 駅：${stationText}</div>`,
+        `<div class="route-detail-summary">N02 rail_line：${escapeHtml(n02Lines)}</div>`,
+        `<div class="route-detail-summary">関連 graph_edge：${graphEdgeNumbers(match.edges)}</div>`,
+      ];
+      physicalSummary = summaryLines.join("");
+    } else {
+      const n02Lines = match.lineIds.map(lid => {
+        const l = lineById.get(lid);
+        return l ? `#${lid} ${l.name}（${l.operator}・鉄道区分:${l.railway_type_code}/事業者区分:${l.provider_type_code}）` : `#${lid}`;
+      }).join("、");
+      const distStr = match.edges.map(e => `#${e.id}: ${formatDistance(e.distance)}`).join("、");
+      physicalSummary = [
+        `<div class="route-detail-summary">距離：${escapeHtml(distStr)}</div>`,
+        `<div class="route-detail-summary">N02 rail_line：${escapeHtml(n02Lines)}</div>`
+      ].join("");
+    }
+
+    const entries = match.opLineIds.map((opLineId, index) => {
+      const opLine = opLineById.get(opLineId);
+      const hitEdges = match.edges.filter(edge => (edge.op_lines || []).includes(opLineId));
+      const allEdges = edgesByOpLine.get(opLineId) || [];
+      const name = opLine ? opLine.name : "不明な運営路線";
+      const operator = opLine ? opLine.operator : "不明";
+      const code = opLine ? opLine.code : "-";
+      const regionStr = opLine && opLine.regions && opLine.regions.length
+        ? opLine.regions.map(regionLabel).join("・")
+        : "圏外";
+      const kindStr = opLine ? `${opLine.service_kind}${opLine.is_loop ? "（環状）" : ""}` : "不明";
+      const stopStat = opLine ? `${opLine.station_count} 駅 / ${formatDistance(opLine.total_distance_m)}` : "-";
+      const hitStops = feature.type === "station"
+        ? match.stations.flatMap(st => (st.op_stops || []).filter(stop => stop.op_line_id === opLineId))
+        : [];
+      const stopRow = feature.type === "station"
+        ? `<dt>停車駅中心性</dt><dd>${
+            hitStops.length
+              ? hitStops.map(stop => {
+                  const metricLines = formatStopCentralityEntries(stop).map(escapeHtml).join("<br>");
+                  return hitStops.length > 1
+                    ? `#${stop.stop_id} ${escapeHtml(stop.stop_name)}<br>${metricLines}`
+                    : metricLines;
+                }).join("<br>")
+              : "直接対応する運営停車駅なし"
+          }</dd>`
+        : "";
       return `<section class="route-entry route-color-${index % 6 + 1}">
-        <div class="route-entry-title"><i class="route-swatch"></i>rail_line #${lineId}</div>
+        <div class="route-entry-title"><i class="route-swatch"></i>operational_line #${opLineId}（ekidata #${escapeHtml(code)}）</div>
         <dl>
-          <dt>路線名</dt><dd>${escapeHtml(name)}</dd>
+          <dt>運営路線名</dt><dd>${escapeHtml(name)}</dd>
           <dt>事業者</dt><dd>${escapeHtml(operator)}</dd>
-          <dt>鉄道区分コード</dt><dd>${escapeHtml(railwayType)}</dd>
-          <dt>事業者区分コード</dt><dd>${escapeHtml(providerType)}</dd>
+          <dt>経過地域・種別</dt><dd>${escapeHtml(regionStr)}・${escapeHtml(kindStr)}</dd>
+          <dt>停車駅・総距離</dt><dd>${escapeHtml(stopStat)}</dd>
+          ${stopRow}
           <dt>命中 graph_edge</dt><dd>${graphEdgeNumbers(hitEdges)}</dd>
           <dt>路線全体</dt><dd>${allEdges.length.toLocaleString("ja-JP")} graph_edge</dd>
         </dl>
       </section>`;
     }).join("");
     detail.classList.add("route-detail");
-    detail.innerHTML = `<div class="route-detail-heading">${heading}</div>${edgeSummary}
-      <div class="route-detail-summary">命中 rail_line：${match.lineIds.length}件</div>${entries}`;
+    detail.innerHTML = `<div class="route-detail-heading">${heading}</div>${physicalSummary}
+      <div class="route-detail-summary">命中 運営路線 (operational_line)：${match.opLineIds.length}件</div>${entries}`;
     return true;
   }
 
@@ -1443,12 +2147,15 @@ canvas.dragging { cursor: grabbing; }
     if (!feature) {
       detail.classList.remove("route-detail");
       detail.textContent = routeMode
-        ? "駅または接続にカーソルを合わせると、命中した路線全体を確認できます。"
+        ? (isLegacyMode()
+            ? "駅または接続にカーソルを合わせると、命中したN02路線（rail_line）全体を確認できます。"
+            : "駅または接続にカーソルを合わせると、命中した運営路線（ekidata）全体と詳細属性を確認できます。")
         : "ノードまたは接続にカーソルを合わせるか、クリックすると詳細を表示します。";
       return;
     }
     if (routeMode && updateRouteDetail(feature)) return;
     detail.classList.remove("route-detail");
+    const legacy = isLegacyMode();
     if (feature.type === "station") {
       const station = feature.item;
       const members = stationsByGroup.get(station.group) || [station];
@@ -1457,43 +2164,86 @@ canvas.dragging { cursor: grabbing; }
       const passengers = station.passengers === null
         ? "欠測（完全な組合計を確定できません）"
         : `${station.passengers.toLocaleString("ja-JP")} 人/日`;
-      detail.textContent = [
+      const detailLines = [
         `${station.group_name}（グループ #${station.group}）`,
         `グループコード：${station.group_code}`,
         `2024年1日あたり乗降客数：${passengers}`,
         `同グループの表示駅：${members.length}件`,
-        `路線：${routes}`,
-        `媒介中心性（Betweenness）：${station.betweenness !== undefined && station.betweenness !== null ? Number(station.betweenness).toExponential(4) : "0.0000e+0"}`,
-        `調和中心性（Harmonic）：${station.harmonic !== undefined && station.harmonic !== null ? Number(station.harmonic).toExponential(4) : "0.0000e+0"}`,
+        legacy ? `路線：${routes}` : `N02路線：${routes}`,
+        ...(legacy ? [] : formatStopCentralityLines(station)),
         `対象駅：${station.line_name}・${station.station_name}${suffix}`,
         `出典ID：${station.source_id}`,
-      ].join("\n");
+      ];
+      detail.textContent = detailLines.join("\n");
     } else if (feature.type === "junction") {
-      const line = lineById.get(feature.item.line);
-      detail.textContent = [
-        `分岐ノード #${feature.item.node}`,
-        `路線：${line ? line.name : "不明な路線"}`,
-      ].join("\n");
+      const junctions = feature.items || [feature.item];
+      if (junctions.length === 1) {
+        const line = lineById.get(junctions[0].line);
+        detail.textContent = [
+          `分岐ノード #${junctions[0].node}`,
+          `路線：${line ? line.name : "不明な路線"}`,
+        ].join("\n");
+      } else {
+        const lineNames = [...new Set(junctions.map(j => {
+          const line = lineById.get(j.line);
+          return line ? `${line.name}（${line.operator}）` : `不明な路線（ID ${j.line}）`;
+        }))];
+        detail.textContent = [
+          `同位置の分岐ノード：${junctions.length}件（${junctions.map(j => `#${j.node}`).join("、")}）`,
+          "路線：",
+          ...lineNames.map(name => `・${name}`),
+        ].join("\n");
+      }
     } else {
       const edges = feature.items || [feature.item];
       const lines = [];
       const seenLineIds = new Set();
+      const opLines = [];
+      const seenOpIds = new Set();
       for (const edge of edges) {
-        if (seenLineIds.has(edge.line)) continue;
-        seenLineIds.add(edge.line);
-        const line = lineById.get(edge.line);
-        lines.push(line ? `${line.name}（${line.operator}）` : `不明な路線（ID ${edge.line}）`);
+        if (!seenLineIds.has(edge.line)) {
+          seenLineIds.add(edge.line);
+          const line = lineById.get(edge.line);
+          lines.push(line ? `${line.name}（${line.operator}）` : `不明な路線（ID ${edge.line}）`);
+        }
+        if (!legacy) {
+          for (const opId of edge.op_lines || []) {
+            if (!seenOpIds.has(opId)) {
+              seenOpIds.add(opId);
+              const op = opLineById.get(opId);
+              if (op) opLines.push(`${op.name}（${op.operator}）`);
+            }
+          }
+        }
       }
-      if (edges.length === 1) {
+      if (legacy) {
+        if (edges.length === 1) {
+          detail.textContent = [
+            `接続 #${edges[0].id}`,
+            `路線：${lines[0]}`,
+            `距離：${formatDistance(edges[0].distance)}`,
+          ].join("\n");
+        } else {
+          detail.textContent = [
+            `同位置の接続：${edges.length}件`,
+            "路線：",
+            ...lines.map(line => `・${line}`),
+            "接続と距離：",
+            ...edges.map(edge => `・#${edge.id}：${formatDistance(edge.distance)}`),
+          ].join("\n");
+        }
+      } else if (edges.length === 1) {
         detail.textContent = [
           `接続 #${edges[0].id}`,
-          `路線：${lines[0]}`,
+          `運営路線（ekidata）：${opLines.length ? opLines.join("、") : "なし"}`,
+          `N02路線：${lines[0]}`,
           `距離：${formatDistance(edges[0].distance)}`,
         ].join("\n");
       } else {
         detail.textContent = [
           `同位置の接続：${edges.length}件`,
-          "路線：",
+          `運営路線（ekidata）：${opLines.length ? opLines.join("、") : "なし"}`,
+          "N02路線：",
           ...lines.map(line => `・${line}`),
           "接続と距離：",
           ...edges.map(edge => `・#${edge.id}：${formatDistance(edge.distance)}`),
@@ -1599,6 +2349,16 @@ canvas.dragging { cursor: grabbing; }
     updateDetail();
     requestDraw();
   });
+  regionBar.addEventListener("click", event => {
+    const btn = event.target.closest(".region-tab");
+    if (!btn) return;
+    const region = btn.dataset.region;
+    if (!region || region === currentRegion) return;
+    resetLockedMode();
+    applyRegionFilter(region);
+    resetView();
+  });
+
   const lockedCard = document.getElementById("locked-card");
   let lockedStation1 = null;
   let lockedStation2 = null;
@@ -1612,6 +2372,12 @@ canvas.dragging { cursor: grabbing; }
     list.push(c);
     railAdj.set(c.from, list);
   });
+  const legacyRailAdj = new Map();
+  (data.legacy_connections || []).forEach(c => {
+    const list = legacyRailAdj.get(c.from) || [];
+    list.push(c);
+    legacyRailAdj.set(c.from, list);
+  });
 
   function fastDist(lon1, lat1, lon2, lat2) {
     const rad = Math.PI / 180;
@@ -1623,8 +2389,7 @@ canvas.dragging { cursor: grabbing; }
 
   function getTransferStations(base) {
     const res = [];
-    const rad = Math.PI / 180;
-    for (const s of data.stations) {
+    for (const s of activeStations) {
       if (s.station === base.station) continue;
       if (Math.abs(s.lat - base.lat) > 0.008 || Math.abs(s.lon - base.lon) > 0.008) continue;
       const d = fastDist(base.lon, base.lat, s.lon, s.lat);
@@ -1640,6 +2405,7 @@ canvas.dragging { cursor: grabbing; }
 
   function computeShortestPathDijkstra(fromId, toId) {
     if (fromId === toId) return { cost_s: 0, steps: [] };
+    const activeStationIds = new Set(activeStations.map(s => s.station));
     const dist = new Map();
     const parent = new Map();
     dist.set(fromId, 0);
@@ -1676,12 +2442,15 @@ canvas.dragging { cursor: grabbing; }
       if (u === toId) break;
       if (cost > dist.get(u)) continue;
 
-      for (const c of (railAdj.get(u) || [])) {
+      const adjSource = isLegacyMode() ? legacyRailAdj : railAdj;
+      for (const c of (adjSource.get(u) || [])) {
+        if (!activeStationIds.has(c.to)) continue;
         const alt = cost + c.time_cost;
         if (!dist.has(c.to) || alt < dist.get(c.to)) {
           dist.set(c.to, alt);
           parent.set(c.to, {
             prev: u, type: 'rail', repr: c.id, conn: c,
+            opLineName: c.op_line_name || '',
             shinkansen: Boolean(c.shinkansen),
             time: c.time_cost, distance: c.distance,
             fromStation: stationMap.get(u), toStation: stationMap.get(c.to),
@@ -1747,11 +2516,19 @@ canvas.dragging { cursor: grabbing; }
     lockedCard.style.display = 'block';
 
     if (lockedStation1 && !lockedStation2) {
+      const stopLinesHtml = isLegacyMode()
+        ? ""
+        : formatStopCentralityLines(lockedStation1)
+            .map(line => {
+              const pad = line.startsWith(" - ") ? " padding-left: 10px;" : "";
+              return `<div class="muted" style="font-size:12px; margin-top:2px;${pad}">${escapeHtml(line.trimStart())}</div>`;
+            })
+            .join("");
       lockedCard.style.borderColor = '#10b981';
       lockedCard.innerHTML = `
         <div style="font-weight:700; font-size:15px; color:#10b981; margin-bottom:4px;">乗換可能駅（600m以内）</div>
         <div>基準駅：<strong>${lockedStation1.station_name}</strong>（${lockedStation1.line_name}）<span class="muted">[ID: ${lockedStation1.station}]</span></div>
-        <div class="muted" style="font-size:12px; margin-top:2px;">媒介中心性: ${(Number(lockedStation1.betweenness) || 0).toExponential(4)} ｜ 調和中心性: ${(Number(lockedStation1.harmonic) || 0).toExponential(4)}</div>
+        ${stopLinesHtml}
         <hr style="margin:8px 0; border:none; border-top:1px solid var(--border);">
         <div style="font-weight:600; margin-bottom:4px;">乗換可能駅：${lockedTransferList.length} 件</div>
         <ul style="max-height:220px; overflow-y:auto; padding-left:20px; margin:0 0 8px 0;">
@@ -1791,7 +2568,7 @@ canvas.dragging { cursor: grabbing; }
           <div style="max-height:220px; overflow-y:auto; font-size:12.5px; padding-right:4px;">
             ${lockedShortestPath.steps.map((s, idx) => `
               <div style="margin-bottom:6px; padding:4px 6px; background:rgba(0,0,0,0.03); border-radius:4px; border-left:3px solid ${s.type === 'rail' ? '#0284c7' : '#10b981'};">
-                <div><strong>#${idx+1}</strong> ${s.type === 'rail' ? `<span style="color:#0284c7; font-weight:600;">[路線接続] 接続ID #${s.repr}${s.shinkansen ? '（新幹線）' : ''}</span>` : `<span style="color:#10b981; font-weight:600;">[乗換リンク] ${s.repr}</span>`}</div>
+                <div><strong>#${idx+1}</strong> ${s.type === 'rail' ? (isLegacyMode() ? `<span style="color:#0284c7; font-weight:600;">[路線接続] 接続ID #${s.repr}${s.shinkansen ? '（新幹線）' : ''}</span>` : `<span style="color:#0284c7; font-weight:600;">[運営接続 #${s.repr}] ${escapeHtml(s.opLineName || '')}</span>`) : `<span style="color:#10b981; font-weight:600;">[乗換リンク] ${s.repr}</span>`}</div>
                 <div style="font-size:12px;">${s.fromStation.station_name} → ${s.toStation.station_name} ｜ ${s.type === 'rail' ? `距離: ${Math.round(s.distance)}m ｜ 走行・停車: ${Math.round(s.time)}秒` : `徒歩: ${Math.round(s.distance)}m ｜ 乗換所要: ${Math.round(s.time)}秒`}</div>
               </div>
             `).join('')}
@@ -1926,6 +2703,7 @@ canvas.dragging { cursor: grabbing; }
   resetButton.addEventListener("click", resetView);
   window.addEventListener("resize", resize);
   window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", requestDraw);
+  applyRegionFilter("all");
   resize();
 })();
 </script>

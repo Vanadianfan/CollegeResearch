@@ -19,8 +19,8 @@ def ensure_shortest_path_table(connection: sqlite3.Connection) -> None:
     """全駅間の最短経路コストを保持する station_shortest_path テーブルを生成する。"""
     connection.executescript("""
         CREATE TABLE IF NOT EXISTS station_shortest_path (
-            from_station_id INTEGER NOT NULL REFERENCES station(id),
-            to_station_id INTEGER NOT NULL REFERENCES station(id),
+            from_station_id INTEGER NOT NULL,
+            to_station_id INTEGER NOT NULL,
             cost_s REAL NOT NULL,
             PRIMARY KEY (from_station_id, to_station_id)
         );
@@ -37,6 +37,7 @@ def calculate_all_shortest_paths(
     source_station_ids: Iterable[int] | None = None,
     limit: int | None = None,
     batch_size: int = 50000,
+    region: str | None = None,
 ) -> int:
     """
     全駅間の最短時間経路コストを算出し、station_shortest_path テーブルへ一括保存する。
@@ -46,8 +47,8 @@ def calculate_all_shortest_paths(
 
     with sqlite3.connect(db_file) as con:
         ensure_shortest_path_table(con)
-        print("RailwayGraph（経路探索グラフ）構築中...")
-        graph = RailwayGraph(con)
+        print("RailwayGraph（運營経路探索グラフ）構築中...")
+        graph = RailwayGraph(con, region=region)
 
         all_nodes = list(graph.adj.keys())
         if source_station_ids is not None:
@@ -116,9 +117,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="全駅間の最短時間経路コストを計算し、SQLiteに保存します。")
     parser.add_argument("--database", type=Path, default=DEFAULT_DB, help="SQLite データベースパス")
     parser.add_argument("--limit", type=int, default=None, help="計算対象とする出発駅数の上限（テスト用）")
+    parser.add_argument("--region", choices=["all", "tokyo", "kinki"], default="all", help="計算対象地域（all / tokyo / kinki）")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    calculate_all_shortest_paths(db_path=args.database, limit=args.limit)
+    calculate_all_shortest_paths(
+        db_path=args.database,
+        limit=args.limit,
+        region=None if args.region == "all" else args.region,
+    )

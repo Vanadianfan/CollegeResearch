@@ -1,0 +1,73 @@
+flowchart TB
+    classDef phys fill:#182621,stroke:#34d399,stroke-width:2.5px,color:#ffffff,font-size:16px;
+    classDef n02core fill:#262118,stroke:#fbbf24,stroke-width:2.5px,color:#ffffff,font-size:16px;
+    classDef n02support fill:#211d16,stroke:#fbbf24,stroke-width:1.6px,color:#f1f5f9,font-size:16px;
+    classDef operational fill:#17232c,stroke:#38bdf8,stroke-width:2.5px,color:#ffffff,font-size:16px;
+
+    subgraph ZONE_EKI["③ ekidata 營運路線網路層"]
+        direction TB
+        OL["operational_line<br/>營運路線基本定義與形態"]:::operational
+        OLS["operational_line_stop<br/>停靠站序與都道府縣歸屬<br/>全域／區域內中心性指標"]:::operational
+        OE["operational_edge<br/>相鄰停靠站區間、距離與耗時"]:::operational
+        OEHAS["operational_edge_has_<br/>graph_edge<br/>營運區間經過的壓縮邊序列"]:::operational
+    end
+
+    subgraph ZONE_PHYS["① 共用物理鐵道層（車站實體與軌道拓樸）"]
+        direction TB
+        SG["station_group<br/>車站群組與乘降客數"]:::phys
+        S["station<br/>各路線上的車站實體<br/>都市圈歸屬（僅作可視化區分）"]:::phys
+        SC["station_component<br/>車站線段的連通元件"]:::phys
+        SA["station_anchor<br/>車站在軌道上的代表點"]:::phys
+        NN["network_node<br/>端點、轉折與分岔節點"]:::phys
+        GE["graph_edge<br/>節點間的拓樸壓縮邊"]:::phys
+        GEHAS["graph_edge_has_<br/>atomic_segment<br/>壓縮邊包含的原子線段序列"]:::phys
+        AS["atomic_segment<br/>相鄰兩節點間的最小軌道段"]:::phys
+    end
+
+    subgraph ZONE_N02["② N02 鐵道設施描述層"]
+        direction TB
+        RL["rail_line<br/>N02 路線與事業者定義"]:::n02support
+        RLC["rail_line_component<br/>N02 路線的獨立連通區段"]:::n02support
+        CONN["station_connection<br/>N02 相鄰站間連線與里程組成"]:::n02core
+        CONNHAS["station_connection_has_<br/>graph_edge<br/>站間連線經過的壓縮邊序列"]:::n02core
+    end
+
+    %% ③ ekidata 營運路線網路層關聯
+    OL ==>|"定義停靠站序列"| OLS
+    OL ==>|"定義營運區間邊"| OE
+    OLS <==>|"起迄停靠站<br/>界定營運區間"| OE
+    OE ==>|"展開為壓縮邊"| OEHAS
+    OLS -.->|"對應代表點<br/>station_anchor_id"| SA
+    OEHAS ==>|"依序對應單條<br/>壓縮邊"| GE
+
+    %% ① 共用物理鐵道層關聯
+    SG ==>|"群組包含車站"| S
+    S ==>|"拆分為幾何片段"| SC
+    SC ==>|"定位路網代表點"| SA
+    SA ==>|"綁定至路網節點"| NN
+    NN <==>|"起迄節點<br/>界定壓縮邊"| GE
+    GE ==>|"展開為原子線段"| GEHAS
+    NN <==>|"起迄節點<br/>界定線段"| AS
+    GEHAS ==>|"依序對應單條<br/>原子線段"| AS
+
+    %% ② N02 鐵道設施描述層關聯
+    RL -->|"拆分為連通區段"| RLC
+    SA <==>|"起迄代表點<br/>界定站間連線"| CONN
+    CONN ==>|"展開為壓縮邊"| CONNHAS
+    CONNHAS ==>|"依序對應單條<br/>壓縮邊"| GE
+    RL -.->|"line_id"| S
+    RL -.->|"line_id"| NN
+    RL -.->|"line_id"| AS
+    RLC -.->|"line_component_id"| CONN
+    RLC -.->|"line_component_id"| GE
+
+    style ZONE_EKI fill:#111f28,stroke:#38bdf8,stroke-width:2px,stroke-dasharray:6 4,color:#38bdf8
+    style ZONE_PHYS fill:#0f201a,stroke:#34d399,stroke-width:2px,stroke-dasharray:6 4,color:#34d399
+    style ZONE_N02 fill:#221c12,stroke:#fbbf24,stroke-width:2px,stroke-dasharray:6 4,color:#fbbf24
+
+    linkStyle 0,1,2,3,5 stroke:#38bdf8,stroke-width:2.5px,color:#bae6fd;
+    linkStyle 4 stroke:#38bdf8,stroke-width:2px,stroke-dasharray:3 3,color:#bae6fd;
+    linkStyle 6,7,8,9,10,11,12,13 stroke:#34d399,stroke-width:2.5px,color:#a7f3d0;
+    linkStyle 14 stroke:#fbbf24,stroke-width:1.8px,color:#fde68a;
+    linkStyle 15,16,17 stroke:#fbbf24,stroke-width:2.5px,color:#fde68a;
+    linkStyle 18,19,20,21,22 stroke:#94a3b8,stroke-width:1.5px,stroke-dasharray:3 3,color:#cbd5e1;

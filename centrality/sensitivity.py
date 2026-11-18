@@ -15,8 +15,23 @@ from .calculate import compute_centralities
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RAIL_DB = PROJECT_ROOT / "rail_network.sqlite"
-UNBOUNDED_OUTPUT_DB = PROJECT_ROOT / "network_sensitivity_unbounded.sqlite"
-CUTOFF_OUTPUT_DB = PROJECT_ROOT / "network_sensitivity_cutoff.sqlite"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "network_sensitivity"
+
+
+def build_sensitivity_db_path(
+    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    *,
+    region: str | None = None,
+    mode: str = "cutoff",
+) -> Path:
+    """組合區域與截斷模式後的敏感度分析 SQLite 輸出路徑。"""
+    region_part = f"_{region}" if region in ("tokyo", "kinki") else ""
+    mode_part = "unbounded" if mode == "unbounded" else "cutoff"
+    return output_dir / f"network_sensitivity{region_part}_{mode_part}.sqlite"
+
+
+UNBOUNDED_OUTPUT_DB = build_sensitivity_db_path(DEFAULT_OUTPUT_DIR, region=None, mode="unbounded")
+CUTOFF_OUTPUT_DB = build_sensitivity_db_path(DEFAULT_OUTPUT_DIR, region=None, mode="cutoff")
 
 
 def build_scenarios(time_cutoff_s: float | None) -> list[NetworkParams]:
@@ -169,15 +184,41 @@ def ensure_sensitivity_schema(out_con: sqlite3.Connection) -> None:
     out_con.commit()
 
 
-def get_station_info(rail_con: sqlite3.Connection) -> dict[int, tuple[str, str]]:
-    """取得站點名稱與路線名稱字典: station_id -> (station_name, line_name)"""
+def get_station_info(
+    rail_con: sqlite3.Connection,
+    region: str | None = None,
+) -> dict[int, tuple[str, str]]:
+    """取得營運停車站點名稱與路線名稱字典: stop_id -> (stop_name, operational_line_name)"""
     cur = rail_con.cursor()
-    cur.execute("""
-        SELECT s.id, s.name, l.name
-        FROM station AS s
-        JOIN rail_line AS l ON l.id = s.line_id
-    """)
-    return {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+    has_op_stop = (
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operational_line_stop'"
+        ).fetchone()
+        is not None
+    )
+    if not has_op_stop:
+        raise RuntimeError(
+            "operational_line_stop table is missing; sensitivity analysis requires operational topology."
+        )
+    if region in ("tokyo", "kinki"):
+        rows = cur.execute(
+            """
+            SELECT ols.id, ols.stop_name, ol.name
+            FROM operational_line_stop AS ols
+            JOIN operational_line AS ol ON ol.id = ols.operational_line_id
+            WHERE ols.region = ?
+            """,
+            (region,),
+        )
+    else:
+        rows = cur.execute(
+            """
+            SELECT ols.id, ols.stop_name, ol.name
+            FROM operational_line_stop AS ols
+            JOIN operational_line AS ol ON ol.id = ols.operational_line_id
+            """
+        )
+    return {int(row[0]): (row[1], row[2]) for row in rows.fetchall()}
 
 
 def upsert_scenario_metadata(out_con: sqlite3.Connection, scenario: NetworkParams) -> None:
@@ -205,6 +246,7 @@ def run_scenario(
     out_con: sqlite3.Connection,
     station_info: dict[int, tuple[str, str]],
     force: bool = False,
+    region: str | None = None,
 ) -> None:
     """執行單一情境之路網建置與中心性計算（媒介中心性 & 調和中心性），並存入獨立輸出庫"""
     upsert_scenario_metadata(out_con, scenario)
@@ -229,7 +271,7 @@ def run_scenario(
     print(f"==================================================")
 
     t0 = time.time()
-    graph = RailwayGraph(rail_con, params=scenario)
+    graph = RailwayGraph(rail_con, params=scenario, region=region)
     print(f"路網建立完成 ({time.time() - t0:.2f}s) - 節點數: {len(graph.adj)}, 邊數: {sum(len(v) for v in graph.adj.values())}")
 
     bc_dict, hc_dict = compute_centralities(graph, time_cutoff_s=scenario.time_cutoff_s)
@@ -387,6 +429,7 @@ def run_sensitivity_pipeline(
     time_cutoff_s: float | None,
     scenario_names: list[str] | None = None,
     force: bool = False,
+    region: str | None = None,
 ) -> int:
     """執行指定時間截斷條件下之完整 OAT 感度分析流程"""
     rail_db = rail_db_path.resolve()
@@ -395,6 +438,8 @@ def run_sensitivity_pipeline(
     if not rail_db.exists():
         print(f"[ERROR] 找不到鐵路資料庫: {rail_db}")
         return 1
+
+    out_db.parent.mkdir(parents=True, exist_ok=True)
 
     all_scenarios = build_scenarios(time_cutoff_s=time_cutoff_s)
     selected_scenarios = all_scenarios
@@ -406,16 +451,18 @@ def run_sensitivity_pipeline(
             return 1
 
     cutoff_label = f"{time_cutoff_s:.0f}秒 ({time_cutoff_s / 60.0:.0f}分)" if time_cutoff_s is not None else "なし（全域）"
+    region_label = region if region else "全体 (all)"
     print(f"讀取基礎路網: {rail_db}")
     print(f"輸出目標庫:   {out_db}")
+    print(f"分析區域設定: {region_label}")
     print(f"時間截斷設定: {cutoff_label}")
 
     with sqlite3.connect(rail_db) as rail_con, sqlite3.connect(out_db) as out_con:
         ensure_sensitivity_schema(out_con)
-        station_info = get_station_info(rail_con)
+        station_info = get_station_info(rail_con, region=region)
 
         for sc in selected_scenarios:
-            run_scenario(sc, rail_con, out_con, station_info, force=force)
+            run_scenario(sc, rail_con, out_con, station_info, force=force, region=region)
 
         evaluate_and_report(out_con)
 
@@ -423,14 +470,50 @@ def run_sensitivity_pipeline(
     return 0
 
 
+def _resolve_regions(region_arg: str | None) -> list[str | None]:
+    """依 CLI 參數解析要執行的區域清單（未指定時執行全國與兩大都市圈全組合）。"""
+    if region_arg is None:
+        return [None, "tokyo", "kinki"]
+    if region_arg == "all":
+        return [None]
+    return [region_arg]
+
+
+def _resolve_modes(cutoff_flag: bool, unbounded_flag: bool, mode_arg: str | None) -> list[str]:
+    """依 CLI 參數解析要執行的截斷模式清單（未指定時同時執行 cutoff 與 unbounded）。"""
+    flag_modes: list[str] = []
+    if cutoff_flag:
+        flag_modes.append("cutoff")
+    if unbounded_flag:
+        flag_modes.append("unbounded")
+
+    if mode_arg in ("cutoff", "unbounded"):
+        if flag_modes and flag_modes != [mode_arg]:
+            raise ValueError("--mode 與 --cutoff/--unbounded 指定互相衝突")
+        return [mode_arg]
+    if flag_modes:
+        return flag_modes
+    return ["cutoff", "unbounded"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="執行鐵路網參數敏感度分析並儲存至獨立 SQLite")
     parser.add_argument("--database", type=Path, default=DEFAULT_RAIL_DB, help="原始路網資料庫路徑")
     parser.add_argument(
+        "--cutoff",
+        action="store_true",
+        help="僅執行時間截斷版（cutoff）；可與 --unbounded 同時省略以執行全組合",
+    )
+    parser.add_argument(
+        "--unbounded",
+        action="store_true",
+        help="僅執行無時間截斷版（unbounded）；可與 --cutoff 同時省略以執行全組合",
+    )
+    parser.add_argument(
         "--mode",
-        choices=("cutoff", "unbounded"),
-        default="cutoff",
-        help="分析模式: cutoff (預設 120 分時間截斷) 或 unbounded (無時間截斷)",
+        choices=("all", "cutoff", "unbounded"),
+        default=None,
+        help="分析模式（相容舊參數）：cutoff、unbounded 或 all（預設同時執行兩者）",
     )
     parser.add_argument(
         "--time-cutoff",
@@ -438,25 +521,58 @@ def main() -> int:
         default=DEFAULT_TIME_CUTOFF_S,
         help="cutoff 模式下之時間截斷閾值（秒），預設 7200（120分）",
     )
-    parser.add_argument("--output", type=Path, default=None, help="敏感度分析結果資料庫路徑（預設依 mode 自動決定）")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"敏感度分析資料庫輸出子目錄（預設: {DEFAULT_OUTPUT_DIR.name}/）",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="指定單一輸出資料庫路徑（僅限單一 region × mode 組合時使用）",
+    )
     parser.add_argument("--scenarios", nargs="+", default=None, help="指定執行的情境名稱（預設執行全部7種）")
     parser.add_argument("--force", action="store_true", help="強制重新計算已存在的情境")
+    parser.add_argument(
+        "--region",
+        choices=("all", "tokyo", "kinki"),
+        default=None,
+        help="限定計算區域：all（僅全國）、tokyo（東京圈）、kinki（近畿圈）；未指定時執行三者全組合",
+    )
     args = parser.parse_args()
 
-    if args.mode == "unbounded":
-        cutoff_val = None
-        out_db = args.output or UNBOUNDED_OUTPUT_DB
-    else:
-        cutoff_val = args.time_cutoff
-        out_db = args.output or CUTOFF_OUTPUT_DB
+    try:
+        modes = _resolve_modes(args.cutoff, args.unbounded, args.mode)
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    return run_sensitivity_pipeline(
-        rail_db_path=args.database,
-        out_db_path=out_db,
-        time_cutoff_s=cutoff_val,
-        scenario_names=args.scenarios,
-        force=args.force,
-    )
+    regions = _resolve_regions(args.region)
+    targets = [(region, mode) for region in regions for mode in modes]
+
+    if args.output is not None and len(targets) != 1:
+        parser.error("--output 僅能在單一區域與單一截斷模式時指定；多組合請改用 --output-dir")
+
+    output_dir = args.output_dir
+    exit_code = 0
+    for idx, (region, mode) in enumerate(targets, start=1):
+        cutoff_val = None if mode == "unbounded" else args.time_cutoff
+        out_db = args.output or build_sensitivity_db_path(output_dir, region=region, mode=mode)
+        region_label = region or "全國"
+        print(f"\n[{idx}/{len(targets)}] 執行敏感度分析: region={region_label}, mode={mode} -> {out_db}")
+        rc = run_sensitivity_pipeline(
+            rail_db_path=args.database,
+            out_db_path=out_db,
+            time_cutoff_s=cutoff_val,
+            scenario_names=args.scenarios,
+            force=args.force,
+            region=region,
+        )
+        if rc != 0:
+            exit_code = rc
+
+    return exit_code
 
 
 if __name__ == "__main__":

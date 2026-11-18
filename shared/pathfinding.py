@@ -10,6 +10,7 @@ from .params import DEFAULT_PARAMS, NetworkParams
 from .transfer import (
     calculate_transfer_cost,
     fast_distance_m,
+    get_all_operational_stop_coordinates,
     get_all_station_coordinates,
 )
 
@@ -21,15 +22,23 @@ TRAIN_STOP_PENALTY_S = DEFAULT_PARAMS.train_stop_penalty_s
 
 class RailwayGraph:
     """
-    整合鐵路線路與步行轉乘之時空拓撲圖。
-    節點: station_id
+    整合鐵路線路與步行轉乘之時空拓撲圖（預設使用 ekidata 運營網路與 N02 物理距離）。
+    節點: operational_line_stop.id (或傳統模式下之 station.id)
     邊:
-      1. 既有軌道邊: 代表兩相鄰站間列車運行，邊標識為 station_connection.id (整數邊號)
+      1. 既有軌道邊: 代表兩相鄰停靠站間列車運行，邊標識為 operational_edge.id (整數邊號)
       2. 擴展轉乘邊: 代表上限距離內車站轉乘，邊標識為 '車站id1-車站id2'
     """
 
-    def __init__(self, connection: sqlite3.Connection, params: NetworkParams = DEFAULT_PARAMS):
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        params: NetworkParams = DEFAULT_PARAMS,
+        region: str | None = None,
+        use_operational: bool = True,
+    ):
         self.params = params
+        self.region = region if region in ("tokyo", "kinki") else None
+        self.use_operational = use_operational
         self.adj: dict[int, list[tuple[int, float, Any, str]]] = {}
         # u -> list of (v, time_cost_s, edge_repr, edge_kind)
         # edge_kind: 'rail' | 'transfer'
@@ -40,41 +49,74 @@ class RailwayGraph:
 
     def _build_graph(self, connection: sqlite3.Connection):
         cur = connection.cursor()
+        has_operational = (
+            self.use_operational
+            and cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operational_edge'"
+            ).fetchone()
+            is not None
+        )
 
-        # 建立 anchor_id -> station_id 映射
-        anchor_to_station: dict[int, int] = {}
-        cur.execute("""
-            SELECT a.id, sc.station_id
-            FROM station_anchor AS a
-            JOIN station_component AS sc ON sc.id = a.station_component_id
-        """)
-        for a_id, s_id in cur.fetchall():
-            anchor_to_station[a_id] = s_id
+        if has_operational:
+            where_clause = ""
+            sql_params: tuple[object, ...] = ()
+            if self.region is not None:
+                where_clause = "AND s_from.region = ? AND s_to.region = ?"
+                sql_params = (self.region, self.region)
 
-        # 1. 載入軌道邊 (station_connection)，依 rail_line.provider_type_code 識別新幹線 ('1') 與在來線速度
-        cur.execute("""
-            SELECT sc.id, sc.from_anchor_id, sc.to_anchor_id, sc.distance_m, rl.provider_type_code
-            FROM station_connection AS sc
-            JOIN rail_line_component AS rlc ON rlc.id = sc.line_component_id
-            JOIN rail_line AS rl ON rl.id = rlc.line_id
-            WHERE sc.direction = 'forward'
-        """)
-        for conn_id, from_a, to_a, dist_m, provider_type_code in cur.fetchall():
-            s_from = anchor_to_station.get(from_a)
-            s_to = anchor_to_station.get(to_a)
-            if s_from is not None and s_to is not None and s_from != s_to:
-                speed_mps = (
-                    self.params.shinkansen_speed_mps
-                    if provider_type_code == "1"
-                    else self.params.train_speed_mps
-                )
-                # 列車時間成本 = 距離 / 速度 + 停站加減速懲罰
-                time_cost_s = (dist_m / speed_mps) + self.params.train_stop_penalty_s
-                # 既有整合邊用邊號 (conn_id)
-                self._add_edge(s_from, s_to, time_cost_s, conn_id, "rail")
+            cur.execute(
+                f"""
+                SELECT oe.id, oe.from_stop_id, oe.to_stop_id, oe.distance_m
+                FROM operational_edge AS oe
+                JOIN operational_line_stop AS s_from ON s_from.id = oe.from_stop_id
+                JOIN operational_line_stop AS s_to ON s_to.id = oe.to_stop_id
+                WHERE oe.direction = 'forward' {where_clause}
+                """,
+                sql_params,
+            )
+            for edge_id, s_from, s_to, dist_m in cur.fetchall():
+                if s_from != s_to:
+                    time_cost_s = (
+                        dist_m / self.params.train_speed_mps
+                    ) + self.params.train_stop_penalty_s
+                    self._add_edge(s_from, s_to, time_cost_s, edge_id, "rail")
+
+            station_coords = get_all_operational_stop_coordinates(
+                connection, region=self.region
+            )
+        else:
+            # 傳統 N02 station_connection 模式
+            anchor_to_station: dict[int, int] = {}
+            cur.execute("""
+                SELECT a.id, sc.station_id
+                FROM station_anchor AS a
+                JOIN station_component AS sc ON sc.id = a.station_component_id
+            """)
+            for a_id, s_id in cur.fetchall():
+                anchor_to_station[a_id] = s_id
+
+            cur.execute("""
+                SELECT sc.id, sc.from_anchor_id, sc.to_anchor_id, sc.distance_m, rl.provider_type_code
+                FROM station_connection AS sc
+                JOIN rail_line_component AS rlc ON rlc.id = sc.line_component_id
+                JOIN rail_line AS rl ON rl.id = rlc.line_id
+                WHERE sc.direction = 'forward'
+            """)
+            for conn_id, from_a, to_a, dist_m, provider_type_code in cur.fetchall():
+                s_from = anchor_to_station.get(from_a)
+                s_to = anchor_to_station.get(to_a)
+                if s_from is not None and s_to is not None and s_from != s_to:
+                    speed_mps = (
+                        self.params.shinkansen_speed_mps
+                        if provider_type_code == "1"
+                        else self.params.train_speed_mps
+                    )
+                    time_cost_s = (dist_m / speed_mps) + self.params.train_stop_penalty_s
+                    self._add_edge(s_from, s_to, time_cost_s, conn_id, "rail")
+
+            station_coords = get_all_station_coordinates(connection)
 
         # 2. 載入並構建擴展轉乘邊
-        station_coords = get_all_station_coordinates(connection)
         stations_list = list(station_coords.items())
         n = len(stations_list)
         dist_limit = self.params.max_transfer_distance_m
@@ -90,7 +132,6 @@ class RailwayGraph:
                 dist_m = fast_distance_m(lon1, lat1, lon2, lat2)
                 if dist_m <= dist_limit:
                     _, total_transfer_cost_s = calculate_transfer_cost(dist_m, params=self.params)
-                    # 轉乘邊用「車站id1-車站id2」
                     self._add_edge(s1, s2, total_transfer_cost_s, f"{s1}-{s2}", "transfer")
                     self._add_edge(s2, s1, total_transfer_cost_s, f"{s2}-{s1}", "transfer")
 

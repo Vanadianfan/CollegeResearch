@@ -18,17 +18,34 @@ _UNSET = object()
 
 
 def ensure_centrality_columns(connection: sqlite3.Connection) -> None:
-    """station テーブルに betweenness_centrality および harmonic_centrality カラムが存在することを確認する。"""
+    """station の地域カラムおよび operational_line_stop の中心性・地域カラムが存在することを確認する。"""
     cur = connection.cursor()
     columns = {row[1] for row in cur.execute("PRAGMA table_info(station)")}
-    if "betweenness_centrality" not in columns:
-        cur.execute("ALTER TABLE station ADD COLUMN betweenness_centrality REAL DEFAULT 0.0")
-    if "closeness_centrality" in columns and "harmonic_centrality" not in columns:
-        cur.execute("ALTER TABLE station RENAME COLUMN closeness_centrality TO harmonic_centrality")
-    elif "closeness_centrality" in columns and "harmonic_centrality" in columns:
-        cur.execute("ALTER TABLE station DROP COLUMN closeness_centrality")
-    elif "harmonic_centrality" not in columns:
-        cur.execute("ALTER TABLE station ADD COLUMN harmonic_centrality REAL DEFAULT 0.0")
+    if "region" not in columns:
+        cur.execute("ALTER TABLE station ADD COLUMN region TEXT CHECK(region IN ('tokyo', 'kinki'))")
+
+    has_op_stop = (
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operational_line_stop'"
+        ).fetchone()
+        is not None
+    )
+    if not has_op_stop:
+        raise RuntimeError(
+            "operational_line_stop table is missing; centrality calculation requires the operational topology."
+        )
+
+    ols_columns = {row[1] for row in cur.execute("PRAGMA table_info(operational_line_stop)")}
+    if "betweenness_centrality" not in ols_columns:
+        cur.execute("ALTER TABLE operational_line_stop ADD COLUMN betweenness_centrality REAL DEFAULT 0.0")
+    if "harmonic_centrality" not in ols_columns:
+        cur.execute("ALTER TABLE operational_line_stop ADD COLUMN harmonic_centrality REAL DEFAULT 0.0")
+    if "region" not in ols_columns:
+        cur.execute("ALTER TABLE operational_line_stop ADD COLUMN region TEXT CHECK(region IN ('tokyo', 'kinki'))")
+    if "regional_betweenness_centrality" not in ols_columns:
+        cur.execute("ALTER TABLE operational_line_stop ADD COLUMN regional_betweenness_centrality REAL")
+    if "regional_harmonic_centrality" not in ols_columns:
+        cur.execute("ALTER TABLE operational_line_stop ADD COLUMN regional_harmonic_centrality REAL")
     connection.commit()
 
 
@@ -121,32 +138,126 @@ def compute_centralities(
     return betweenness, harmonic
 
 
+def _sync_station_regions_from_stops(connection: sqlite3.Connection) -> None:
+    """operational_line_stop.region (直接アンカー優先、station_group フォールバック) を station.region へ反映する。"""
+    has_ols_region = any(
+        row[1] == "region"
+        for row in connection.execute("PRAGMA table_info(operational_line_stop)")
+    )
+    if not has_ols_region:
+        return
+    connection.execute(
+        """
+        UPDATE station
+        SET region = CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM station_component AS sc
+                JOIN station_anchor AS a ON a.station_component_id = sc.id
+                JOIN operational_line_stop AS ols ON ols.station_anchor_id = a.id
+                WHERE sc.station_id = station.id
+            ) THEN (
+                SELECT MIN(ols.region)
+                FROM station_component AS sc
+                JOIN station_anchor AS a ON a.station_component_id = sc.id
+                JOIN operational_line_stop AS ols ON ols.station_anchor_id = a.id
+                WHERE sc.station_id = station.id AND ols.region IS NOT NULL
+            )
+            ELSE (
+                SELECT MIN(ols2.region)
+                FROM station AS s2
+                JOIN station_component AS sc2 ON sc2.station_id = s2.id
+                JOIN station_anchor AS a2 ON a2.station_component_id = sc2.id
+                JOIN operational_line_stop AS ols2 ON ols2.station_anchor_id = a2.id
+                WHERE s2.group_id = station.group_id AND ols2.region IS NOT NULL
+            )
+        END
+        """
+    )
+
+
+def _compute_and_write_regional(
+    connection: sqlite3.Connection,
+    params: NetworkParams,
+    time_cutoff_s: float | None,
+    reg: str,
+) -> int:
+    """指定地域 (tokyo / kinki) のみのサブグラフで中心性を算出し、regional_* カラムを更新する。"""
+    print(f"地域別中心性を算出中 ({reg})...")
+    reg_graph = RailwayGraph(connection, params=params, region=reg)
+    reg_bc, reg_hc = compute_centralities(reg_graph, time_cutoff_s=time_cutoff_s)
+
+    target_stop_ids = [
+        row[0]
+        for row in connection.execute(
+            "SELECT id FROM operational_line_stop WHERE region = ?", (reg,)
+        )
+    ]
+    stop_rows = [
+        (reg_bc.get(stop_id, 0.0), reg_hc.get(stop_id, 0.0), stop_id)
+        for stop_id in target_stop_ids
+    ]
+    connection.executemany(
+        """
+        UPDATE operational_line_stop
+        SET regional_betweenness_centrality = ?, regional_harmonic_centrality = ?
+        WHERE id = ?
+        """,
+        stop_rows,
+    )
+    return len(stop_rows)
+
+
 def calculate_and_update_centrality(
     db_path: Path | str = DEFAULT_DB,
     time_cutoff_s: float | None = DEFAULT_TIME_CUTOFF_S,
+    region: str | None = None,
 ) -> None:
-    """全駅の構造中心性（媒介中心性・調和中心性）を算出し、SQLiteデータベースへ保存する。"""
+    """運営停車駅 (operational_line_stop) の構造中心性（全国および地域別）を算出し、SQLiteへ保存する。"""
     db_file = Path(db_path).resolve()
     print(f"データベース接続: {db_file}")
 
     params = NetworkParams(time_cutoff_s=time_cutoff_s)
+    region_filter = region if region in ("tokyo", "kinki") else None
     with sqlite3.connect(db_file) as con:
         ensure_centrality_columns(con)
-        graph = RailwayGraph(con, params=params)
-        betweenness, harmonic = compute_centralities(graph, time_cutoff_s=time_cutoff_s)
 
-        print("station テーブルへ中心性指標を書き込み中...")
-        update_rows = [
-            (betweenness.get(s_id, 0.0), harmonic.get(s_id, 0.0), s_id)
-            for s_id in graph.adj.keys()
-        ]
-        con.executemany("""
-            UPDATE station
-            SET betweenness_centrality = ?, harmonic_centrality = ?
-            WHERE id = ?
-        """, update_rows)
+        if region_filter is None:
+            graph = RailwayGraph(con, params=params, region=None)
+            betweenness, harmonic = compute_centralities(graph, time_cutoff_s=time_cutoff_s)
+            print("operational_line_stop テーブルへ全国中心性指標を書き込み中...")
+            all_stop_ids = [
+                row[0] for row in con.execute("SELECT id FROM operational_line_stop")
+            ]
+            stop_rows = [
+                (betweenness.get(stop_id, 0.0), harmonic.get(stop_id, 0.0), stop_id)
+                for stop_id in all_stop_ids
+            ]
+            con.executemany(
+                """
+                UPDATE operational_line_stop
+                SET betweenness_centrality = ?, harmonic_centrality = ?
+                WHERE id = ?
+                """,
+                stop_rows,
+            )
+            print(f"{len(stop_rows)}運営停車駅の全国中心性指標を更新しました。")
+
+        _sync_station_regions_from_stops(con)
+        con.execute(
+            """
+            UPDATE operational_line_stop
+            SET regional_betweenness_centrality = NULL, regional_harmonic_centrality = NULL
+            WHERE region IS NULL
+            """
+        )
+
+        target_regions = ("tokyo", "kinki") if region_filter is None else (region_filter,)
+        for reg in target_regions:
+            count = _compute_and_write_regional(con, params, time_cutoff_s, reg)
+            print(f"  {reg}: {count}運営停車駅の地域別中心性を更新しました。")
+
         con.commit()
-        print(f"{len(update_rows)}駅の中心性指標を正常に更新しました。")
 
 
 def parse_args() -> argparse.Namespace:
@@ -165,10 +276,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="時間制限を適用せず全域で計算する",
     )
+    parser.add_argument(
+        "--region",
+        choices=["all", "tokyo", "kinki"],
+        default="all",
+        help="計算対象地域（all / tokyo / kinki）",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     cutoff_val = None if args.unbounded else args.time_cutoff
-    calculate_and_update_centrality(db_path=args.database, time_cutoff_s=cutoff_val)
+    calculate_and_update_centrality(
+        db_path=args.database,
+        time_cutoff_s=cutoff_val,
+        region=None if args.region == "all" else args.region,
+    )

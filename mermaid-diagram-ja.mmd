@@ -1,0 +1,73 @@
+flowchart TB
+    classDef phys fill:#182621,stroke:#34d399,stroke-width:2.5px,color:#ffffff,font-size:16px;
+    classDef n02core fill:#262118,stroke:#fbbf24,stroke-width:2.5px,color:#ffffff,font-size:16px;
+    classDef n02support fill:#211d16,stroke:#fbbf24,stroke-width:1.6px,color:#f1f5f9,font-size:16px;
+    classDef operational fill:#17232c,stroke:#38bdf8,stroke-width:2.5px,color:#ffffff,font-size:16px;
+
+    subgraph ZONE_EKI["③ ekidata 運行系統ネットワーク層"]
+        direction TB
+        OL["operational_line<br/>運行系統定義と路線属性"]:::operational
+        OLS["operational_line_stop<br/>停車駅順・都道府県/都市圏区分<br/>全国・地域別中心性指標"]:::operational
+        OE["operational_edge<br/>隣接停車駅区間・距離・所要時間"]:::operational
+        OEHAS["operational_edge_has_<br/>graph_edge<br/>運行区間が辿る縮約エッジ順"]:::operational
+    end
+
+    subgraph ZONE_PHYS["① 共通物理鉄道層（駅実体・軌道トポロジー）"]
+        direction TB
+        SG["station_group<br/>駅グループと乗降客数"]:::phys
+        S["station<br/>路線ごとの駅実体<br/>都市圏区分（可視化分類用）"]:::phys
+        SC["station_component<br/>駅ジオメトリの連結成分"]:::phys
+        SA["station_anchor<br/>軌道上の駅代表点"]:::phys
+        NN["network_node<br/>端点・屈曲・分岐ノード"]:::phys
+        GE["graph_edge<br/>主要ノード間の縮約エッジ"]:::phys
+        GEHAS["graph_edge_has_<br/>atomic_segment<br/>縮約エッジを構成する線分順"]:::phys
+        AS["atomic_segment<br/>隣接ノード間の最小物理線分"]:::phys
+    end
+
+    subgraph ZONE_N02["② N02 鉄道施設ネットワーク層"]
+        direction TB
+        RL["rail_line<br/>N02 路線・事業者定義"]:::n02support
+        RLC["rail_line_component<br/>N02 路線の連結成分"]:::n02support
+        CONN["station_connection<br/>N02 隣接駅間リンクと距離内訳"]:::n02core
+        CONNHAS["station_connection_has_<br/>graph_edge<br/>駅間リンクの縮約エッジ順"]:::n02core
+    end
+
+    %% ③ ekidata 運行系統ネットワーク層
+    OL ==>|"停車駅列を定義"| OLS
+    OL ==>|"運行区間を定義"| OE
+    OLS <==>|"始終点停車駅で<br/>運行区間を定義"| OE
+    OE ==>|"縮約エッジ列へ展開"| OEHAS
+    OLS -.->|"駅代表点へ対応<br/>station_anchor_id"| SA
+    OEHAS ==>|"各要素が参照する<br/>縮約エッジ"| GE
+
+    %% ① 共通物理鉄道層
+    SG ==>|"駅グループに所属"| S
+    S ==>|"連結ジオメトリへ分割"| SC
+    SC ==>|"代表点を配置"| SA
+    SA ==>|"ノードへ対応付け"| NN
+    NN <==>|"始終点ノードで<br/>縮約エッジを定義"| GE
+    GE ==>|"最小線分列へ展開"| GEHAS
+    NN <==>|"始終点ノードで<br/>物理線分を定義"| AS
+    GEHAS ==>|"各要素が参照する<br/>最小物理線分"| AS
+
+    %% ② N02 鉄道施設ネットワーク層
+    RL -->|"連結成分へ分割"| RLC
+    SA <==>|"始終点代表点で<br/>駅間リンクを定義"| CONN
+    CONN ==>|"縮約エッジ列へ展開"| CONNHAS
+    CONNHAS ==>|"各要素が参照する<br/>縮約エッジ"| GE
+    RL -.->|"line_id"| S
+    RL -.->|"line_id"| NN
+    RL -.->|"line_id"| AS
+    RLC -.->|"line_component_id"| CONN
+    RLC -.->|"line_component_id"| GE
+
+    style ZONE_EKI fill:#111f28,stroke:#38bdf8,stroke-width:2px,stroke-dasharray:6 4,color:#38bdf8
+    style ZONE_PHYS fill:#0f201a,stroke:#34d399,stroke-width:2px,stroke-dasharray:6 4,color:#34d399
+    style ZONE_N02 fill:#221c12,stroke:#fbbf24,stroke-width:2px,stroke-dasharray:6 4,color:#fbbf24
+
+    linkStyle 0,1,2,3,5 stroke:#38bdf8,stroke-width:2.5px,color:#bae6fd;
+    linkStyle 4 stroke:#38bdf8,stroke-width:2px,stroke-dasharray:3 3,color:#bae6fd;
+    linkStyle 6,7,8,9,10,11,12,13 stroke:#34d399,stroke-width:2.5px,color:#a7f3d0;
+    linkStyle 14 stroke:#fbbf24,stroke-width:1.8px,color:#fde68a;
+    linkStyle 15,16,17 stroke:#fbbf24,stroke-width:2.5px,color:#fde68a;
+    linkStyle 18,19,20,21,22 stroke:#94a3b8,stroke-width:1.5px,stroke-dasharray:3 3,color:#cbd5e1;

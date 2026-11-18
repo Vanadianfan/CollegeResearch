@@ -114,7 +114,6 @@ class SegmentRow:
     to_node_id: int
     length_m: float
     build_status: str = "ok"
-    line_component_id: int | None = None
 
 
 @dataclass

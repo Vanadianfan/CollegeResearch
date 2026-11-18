@@ -106,6 +106,10 @@ def print_summary(
         "graph_edge_has_atomic_segment",
         "station_connection",
         "station_connection_has_graph_edge",
+        "operational_line",
+        "operational_line_stop",
+        "operational_edge",
+        "operational_edge_has_graph_edge",
     ]
     print(f"SQLite 作成完了: {output_path}")
     for table in tables:

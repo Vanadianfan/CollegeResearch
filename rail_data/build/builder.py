@@ -428,8 +428,6 @@ def build_database_model(
             )
             for node_id in component_nodes:
                 node_by_id[node_id].line_component_id = component_id
-            for segment_id in component_segments:
-                segment_by_id[segment_id].line_component_id = component_id
             nodes_by_component[component_id] = component_nodes
             segments_by_component[component_id] = sorted(component_segments)
             component_no += 1
@@ -700,10 +698,61 @@ def build_database_model(
         connection.id = connection_id
         connections.append(connection)
 
+    # Prune Shinkansen (provider_type_code == '1') after apply_corrections so
+    # full-build correction.txt node/edge IDs remain 100% deterministic.
+    shinkansen_line_ids = {
+        line_id
+        for line_id, key in enumerate(route_keys, start=1)
+        if key.provider_type_code == "1"
+    }
+    line_rows = [
+        (line_id, key)
+        for line_id, key in enumerate(route_keys, start=1)
+        if line_id not in shinkansen_line_ids
+    ]
+    station_rows = [
+        row for row in station_rows if row.line_id not in shinkansen_line_ids
+    ]
+    component_drafts = [
+        comp
+        for comp in component_drafts
+        if comp.line_id not in shinkansen_line_ids
+    ]
+    valid_component_ids = {comp.id for comp in component_drafts}
+    anchors = [
+        anchor
+        for anchor in anchors
+        if anchor.station_component_id in valid_component_ids
+    ]
+    line_components = [
+        lc
+        for lc in line_components
+        if lc.line_id not in shinkansen_line_ids
+    ]
+    valid_line_component_ids = {lc.id for lc in line_components}
+    nodes = [
+        node for node in nodes if node.line_id not in shinkansen_line_ids
+    ]
+    segments = [
+        seg for seg in segments if seg.line_id not in shinkansen_line_ids
+    ]
+    graph_edges = [
+        ge
+        for ge in graph_edges
+        if ge.line_component_id in valid_line_component_ids
+    ]
+    connections = [
+        conn
+        for conn in connections
+        if conn.line_component_id in valid_line_component_ids
+    ]
+
     group_rows: list[StationGroupRow] = []
     station_count_by_group = Counter(row.group_id for row in station_rows)
     for group_code in group_codes:
         group_id = group_id_by_code[group_code]
+        if station_count_by_group[group_id] == 0:
+            continue
         counts = group_name_counts[group_code]
         display_name = counts.most_common(1)[0][0] if counts else group_code
         group_rows.append(
@@ -717,6 +766,7 @@ def build_database_model(
 
     return {
         "route_keys": route_keys,
+        "line_rows": line_rows,
         "group_rows": group_rows,
         "station_rows": station_rows,
         "components": component_drafts,
